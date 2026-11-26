@@ -1479,3 +1479,5 @@ server.listen(PORT, () => {
   console.log('emos-sub prototype listening on http://127.0.0.1:' + PORT);
   console.log('nodes loaded: ' + NODES.map((n) => n.key + '->probe#' + n.probe_node_id).join(', '));
 });
+
+// upstream-update-test-marker 2026-11-26
