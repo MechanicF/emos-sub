@@ -9,7 +9,7 @@
 #   ./manage.sh logs [-f]          查看日志（-f 实时跟随）
 #   ./manage.sh port <端口>        改端口并重启（1-65535）
 #   ./manage.sh autostart on|off   开机自启 开 / 关
-#   ./manage.sh update             git 拉最新代码并重启（会先备份配置）
+#   ./manage.sh update             更新到 GitHub 最新版并重启（先备份配置；.env、节点、设置保留，代码文件被新版覆盖）
 #   ./manage.sh backup             备份配置到 ./backups/
 #   ./manage.sh config             查看当前配置（ADMIN_TOKEN 只显示前 4 位）
 #   ./manage.sh set-token <口令>   改后台口令并重启
@@ -154,12 +154,13 @@ cmd_install() {
   need node && need git || return 1
   local major; major="$(node -v | sed 's/^v//; s/\..*//')"
   [ "$major" -ge 18 ] || { err "Node 版本太低：$(node -v)，需要 >= 18"; return 1; }
-  if [ -d "$INSTALL_DIR/.git" ]; then say "安装目录已有代码，改为更新（git pull）"; (cd "$INSTALL_DIR" && git pull --ff-only) || { err "git pull 失败"; return 1; }
+  if [ -d "$INSTALL_DIR/.git" ]; then say "安装目录已有代码，改为更新"; cmd_update || return 1
   else
     say "安装到 $INSTALL_DIR ..."
     if [ "$REPO_DIR" != "$INSTALL_DIR" ] && [ -f "$REPO_DIR/server.js" ]; then
       mkdir -p "$INSTALL_DIR" && cp -a "$REPO_DIR"/. "$INSTALL_DIR"/ && rm -rf "$INSTALL_DIR/.git"
-      (cd "$INSTALL_DIR" && git init -q -b main && git remote add origin https://github.com/MechanicF/emos-sub.git 2>/dev/null || true)
+      # 把复制过来的代码先提交成本地快照，再连 origin，这样以后 update 能 fetch + 对照
+      (cd "$INSTALL_DIR" && git init -q -b main && git config user.name "emos-sub" && git config user.email "emos-sub@localhost" && git add -A && git commit -qm "install snapshot" && git remote add origin https://github.com/MechanicF/emos-sub.git && git fetch -q origin main 2>/dev/null && git branch --set-upstream-to=origin/main main 2>/dev/null || true)
     else
       git clone https://github.com/MechanicF/emos-sub.git "$INSTALL_DIR" || { err "git clone 失败"; return 1; }
     fi
@@ -234,10 +235,27 @@ cmd_port() {
   do_stop; do_start
 }
 cmd_update() {
-  [ -d "$INSTALL_DIR/.git" ] || { err "安装目录不是 git 仓库，无法更新（当初可能是复制安装的）；手动重装或 git clone"; return 1; }
+  [ -d "$INSTALL_DIR" ] || { err "还没安装，先 ./manage.sh install"; return 1; }
+  need git || return 1
+  # 保证有 origin（复制安装的目录可能只有本地提交）
+  (cd "$INSTALL_DIR" && git remote get-url origin >/dev/null 2>&1) || (cd "$INSTALL_DIR" && git remote add origin https://github.com/MechanicF/emos-sub.git)
   cmd_backup || true
-  (cd "$INSTALL_DIR" && git pull --ff-only) || { err "git pull 失败（可能有本地改动，先备份再处理）"; return 1; }
-  say "已更新到 $(cd "$INSTALL_DIR" && git log --oneline -1)，正在重启..."
+  (cd "$INSTALL_DIR" && git fetch origin main) || { err "git fetch 失败，检查网络和 GitHub 连通性"; return 1; }
+  local ver; ver="$(cd "$INSTALL_DIR" && git rev-parse --short origin/main)"
+  # 用户数据不参与更新，更新前先保住：.env、后台改过的节点和设置
+  local keep; keep="$(mktemp -d)"
+  [ -f "$INSTALL_DIR/.env" ] && cp "$INSTALL_DIR/.env" "$keep/.env"
+  [ -f "$INSTALL_DIR/config/nodes.json" ] && cp "$INSTALL_DIR/config/nodes.json" "$keep/nodes.json"
+  [ -f "$INSTALL_DIR/config/settings.json" ] && cp "$INSTALL_DIR/config/settings.json" "$keep/settings.json"
+  # 只更新代码文件（不 pull、不 reset --hard，避免本地节点配置被冲掉；
+  # 本地改过 server.js 等代码文件会被新版覆盖，改之前已备份）
+  (cd "$INSTALL_DIR" && git checkout origin/main -- server.js README.md manage.sh start.sh .gitignore config/templates) || { err "更新代码文件失败"; rm -rf "$keep"; return 1; }
+  [ -f "$keep/.env" ] && cp "$keep/.env" "$INSTALL_DIR/.env"
+  [ -f "$keep/nodes.json" ] && cp "$keep/nodes.json" "$INSTALL_DIR/config/nodes.json"
+  [ -f "$keep/settings.json" ] && cp "$keep/settings.json" "$INSTALL_DIR/config/settings.json"
+  rm -rf "$keep"
+  chmod +x "$INSTALL_DIR/manage.sh" "$INSTALL_DIR/start.sh" 2>/dev/null || true
+  say "已更新到 origin/main $ver（.env、节点、设置已保留），正在重启..."
   do_stop; do_start
 }
 cmd_backup() {

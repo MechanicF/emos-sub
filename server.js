@@ -147,8 +147,11 @@ function readBody(req) {
   });
 }
 function baseUrl(req) {
-  const proto = req.headers['x-forwarded-proto'] || 'http';
-  return proto + '://' + req.headers.host;
+  // Same base as the EMOS callback: PUBLIC_URL wins, else Host header.
+  // (Previously this ignored PUBLIC_URL, so with a public domain the
+  // callback was https://domain/... while subscription links were
+  // http://127.0.0.1:port/... — now they agree.)
+  return publicBaseUrl(req);
 }
 function getSession(req) {
   // Session id comes from the X-Session header (manual token / demo login)
@@ -849,12 +852,24 @@ async function emosCheck(token) {
 // cannot see a URL #hash, so if EMOS ever puts the token in the hash the
 // callback would see no_token; document that if it happens.
 const EMOS_APP_NAME = process.env.EMOS_APP_NAME || 'emos-sub';
-const PUBLIC_URL = (process.env.PUBLIC_URL || '').replace(/\/+$/, '');
+// PUBLIC_URL: the public base users reach this gateway at, e.g.
+// https://sub.example.com. Normalised: a bare domain without a scheme gets
+// https:// prepended (a scheme-less PUBLIC_URL would otherwise build a
+// callback like "sub.example.com/auth/..." which EMOS cannot redirect to),
+// trailing slashes stripped. Invalid values fail loudly at startup.
+let PUBLIC_URL = (process.env.PUBLIC_URL || '').replace(/\/+$/, '');
+if (PUBLIC_URL && !/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(PUBLIC_URL)) PUBLIC_URL = 'https://' + PUBLIC_URL;
+if (PUBLIC_URL && !/^https?:\/\/[^/]+$/.test(PUBLIC_URL)) {
+  console.error('PUBLIC_URL 无效：' + process.env.PUBLIC_URL + '（应为 https://域名 或 http://域名:端口，不带路径）');
+  process.exit(1);
+}
 const EMOS_LOGIN_TTL_MS = 10 * 60 * 1000;
 const pendingEmosLogins = new Map(); // uuid -> {createdAt}; consume-once, 10 min
 function publicBaseUrl(req) {
   if (PUBLIC_URL) return PUBLIC_URL;
-  const proto = req.headers['x-forwarded-proto'] || (req.socket && req.socket.encrypted ? 'https' : 'http');
+  // x-forwarded-proto may be a comma list ("https, http") — take the first.
+  const xf = (req.headers['x-forwarded-proto'] || '').split(',')[0].trim();
+  const proto = xf || (req.socket && req.socket.encrypted ? 'https' : 'http');
   return proto + '://' + req.headers.host;
 }
 function prunePendingEmosLogins() {

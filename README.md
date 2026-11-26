@@ -66,6 +66,34 @@ node server.js
 
 ## EMOS 登录（/link 跳转回调）
 
+控制台顶部是“用 EMOS 账号登录”按钮，点一下跳到 EMOS 登录页
+（`https://emos.best/link?uuid=<随机>&name=emos-sub&url=<回跳地址>`），
+登录完 EMOS 把浏览器跳回网关的 `/auth/emos/callback`，回跳地址带 `?token=`，
+网关在服务端用 token 调 `GET /api/sign/check` 确认本人，再调
+`GET /api/carrot/current` 核萝卜，> 500 才发 session 和订阅链接。
+
+回跳地址（callback）怎么定，优先级：
+
+1. 环境变量 `PUBLIC_URL`（如 `https://sub.example.com`）——生产部署必须设这个。
+   只写域名不写 scheme 也行，会自动补 `https://`；带路径（如 `https://sub.example.com/x`）
+   启动时直接报错退出，因为那不是合法的回跳根地址；尾斜杠自动去掉。
+2. 没设 `PUBLIC_URL` 时用请求 Host 头拼：反代场景认 `X-Forwarded-Proto`
+   （可能是逗号列表，取第一个），否则按连接是否加密定 http/https。
+   回跳只需**用户浏览器**能访问，不需要 EMOS 服务器能连进来，所以本机测试
+   `http://127.0.0.1:3000/auth/emos/callback` 能用，远程用户必须配公网域名。
+3. 订阅链接（`/sub/`、`/c/`）用的也是同一个根地址，和回跳地址保持一致。
+
+自查回跳地址（不用真的登录）：`GET /api/auth/emos/login-url` 返回
+`{login_url, callback, app_name}`，看 `callback` 是不是你预期的域名。
+`GET /auth/emos` 每次都会生成一个新的待处理 uuid（10 分钟有效、用一次就废），
+所以不要拿 `login-url` 接口返回的链接去和 `/auth/emos` 跳转的链接比 uuid，
+两个是一样格式、不同的一次性值。
+
+uuid 回传未验证：EMOS 文档没写回跳时带不带回 `uuid`。回跳带了 `uuid` 但对不上
+待处理表 → `bad_state`；没带也接受（token 本身还要服务端核验，伪造回跳登不进来）。
+`?token=` 是主参数，`?access_token=` 是备用别名；token 若在 URL `#hash` 里服务端
+看不到，会报 `no_token`（目前没见过这种回跳）。
+
 主登录方式，不用弹窗、不用用户手动复制 token。参考实现是真实 EMOS 客户端
 somebyteorg/emos_music：登录按钮不做弹窗，直接
 `window.location.href = getEmosLoginUrl(window.location.origin)`，
@@ -108,14 +136,6 @@ GET https://emos.best/link?uuid=<crypto.randomUUID()>&name=<应用名>&url=<回�
    URL 是干净的——token 不出现在跳转地址里、不渲染进页面、不写日志，
    只存在内存 session 里，和手动粘贴 token 的流程一样。
    控制台打开时如果 cookie 还有效，会自动恢复成已登录状态，不用重新点。
-
-回调地址怎么来：优先用环境变量 `PUBLIC_URL`（例如
-`PUBLIC_URL=https://sub.example.com`，生产部署时设这个）；没设就用请求
-的 Host 头（`x-forwarded-proto` 或 socket 是否加密决定 http/https）。
-**回调地址要能被用户的浏览器访问到，不需要被 EMOS 的服务器访问到**
-（EMOS 只是让浏览器跳过去）——所以同一台机器上测试时
-`http://127.0.0.1:3000/auth/emos/callback` 能用；但远程用户登录时，
-必须配好公网域名 + `PUBLIC_URL`，否则回调会跳到一个用户打不开的内网地址。
 
 错误码（控制台打开时会显示中文提示，然后用 `history.replaceState`
 把查询串清掉）：
