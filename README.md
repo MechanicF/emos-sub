@@ -31,6 +31,10 @@ PORT=3000 ADMIN_TOKEN=你的口令 node server.js
 ./manage.sh logs -f       # 看日志 / 实时跟随
 ./manage.sh update        # 备份配置后 git pull 最新代码并重启
 ./manage.sh backup        # 备份 .env + config/
+# 注意：update 本身在 2026-11-26 修过一次（旧版用 git pull，装完没设 upstream
+# 时会报 "There is no tracking information" 而失败）。如果你跑 update 遇到
+# 这句报错，说明你手里的 manage.sh 还是旧版，先用下面这行把它换成新版再跑 update：
+#   curl -fsSL https://raw.githubusercontent.com/MechanicF/emos-sub/main/manage.sh -o manage.sh && chmod +x manage.sh && ./manage.sh update
 ./manage.sh set-token <新口令>   # 改后台口令并重启
 ./manage.sh set-url <域名>      # 改公开域名并重启
 ./manage.sh uninstall     # 先备份配置，确认后停服务并删除
