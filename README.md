@@ -2,7 +2,7 @@
 
 EMOS 登录核验萝卜余额，**严格大于门槛（默认 500，可在后台改）**才能进控制台、领取每人专属的订阅链接。节点流量取自 1e.lol 探针的整机总流量，不做每人用量统计。
 
-当前版本：**v1.5.7**（2026-11-26，界面打磨版）
+当前版本：**v1.5.8**（2026-11-26，登录与导入版）
 
 零依赖 Node.js（Node ≥ 18），不用 `npm install`。单文件 `server.js` + `config/` + `manage.sh`。
 
@@ -46,9 +46,9 @@ PORT=3000 ADMIN_TOKEN=你的口令 node server.js
 
 ### 用户：控制台 `/`
 
-点“用 EMOS 账号登录”，跳到 EMOS 登录，回来后服务端验 token，萝卜 > 门槛放行。备用登录：手动粘贴 EMOS Bearer Token。
+点“用 EMOS 账号登录”，跳到 EMOS 登录，回来后服务端验 token，萝卜 > 门槛放行。控制台只保留这一种登录入口。
 
-控制台从上到下：统计行（萝卜 / 节点 / 订阅访问）→ 节点表 → 订阅卡（一条订阅链接 + 一键导入 + 刷新/停用/退出登录）。
+控制台从上到下：统计行（萝卜 / 节点 / 订阅访问）→ 节点表 → 订阅卡（一条订阅链接 + 一键导入 + 刷新/停用/退出登录）。“一键导入”会把订阅链接复制到剪贴板，粘贴到客户端即可（浏览器不再自动跳 `sing-box://`，未注册该协议时不会卡住）。
 
 节点表：节点、到期、状态、今日、本月已用 / 限额。到期默认取探针的 `expires_at`，手动填的优先；14 天内和已过期标红。每台流量是探针上那台服务器的整机网卡总流量。
 
@@ -123,7 +123,7 @@ PORT=3000 ADMIN_TOKEN=你的口令 node server.js
 
 - `GET /` 控制台；`GET /admin` 后台
 - `GET /auth/emos` → EMOS `/link` 登录；`GET /auth/emos/callback` → 回调核验
-- `POST /api/auth` 登录；`POST /api/logout` 退出
+- `POST /api/auth` 登录（接口保留供程序调用与回归测试，控制台不再提供粘贴 Token 入口）；`POST /api/logout` 退出
 - `GET /api/nodes` 节点 + 探针流量；`GET /api/sub-link` 当前订阅地址；`POST /api/sub/refresh` 轮换；`POST /api/sub/disable` 停用
 - `GET /c/?token=&client=`、`GET /sub/:token` 订阅内容；`GET /health` 健康检查；`GET /api/public-settings` 当前门槛
 - 后台：`POST /api/admin/login|logout`、`GET /api/admin/health`、`/api/admin/nodes`（增删改 + `/parse`、`/reorder`）、`/api/admin/shares`（刷新/停用/启用/吊销/全部吊销 `/revoke-all`）、`/api/admin/settings`
@@ -138,6 +138,7 @@ node test/check-fixes.js   # v1.5.5 安全回归：身份绑定、吊销不可�
 
 ## 版本历史
 
+- **v1.5.8**：登录与导入版 — 控制台去掉手动粘贴 Token 登录，只留 EMOS /link 一种入口；“一键导入”改成复制订阅链接到剪贴板（不再跳 `sing-box://` 深链）；复制加 execCommand 兜底，HTTP 下也能复制；登录卡收窄居中
 - **v1.5.7**：界面打磨版 — 修流量条宽度丢 `%` 单位的 bug（之前所有条子都按满格渲染）；订阅说明页垂直居中；后台上下箭头换 SVG 图标；节点协议格改 `.tag`；数字列右对齐 + 等宽字体；停用按钮改红色、退出改文字链接
 - **v1.5.6**：视觉重做版 — 控制台、后台与订阅说明页共用一套 `UI_CSS` 设计语言（近黑底 + 青色点缀、等宽数字、扁平卡片）；按钮文案收短；功能与接口不变
 - **v1.5.5**：安全修复版 — EMOS 身份强制校验（不再退化为 `unknown`）；管理员吊销/停用后必须重新登录；EMOS 故障宽限加硬上限；`X-Forwarded-Proto` 白名单 + 代理信任；超大 body 返回 413 而非断连；探针二次失败标签修正；节点/备份文件 0600 且 `nodes.json` 改为 git 忽略 + example 模板；后台表格改事件委托；未编码 `%` 不再吞掉节点；探针流量按机器去重；订阅响应补安全头；全局异常累计 5 次退出让 systemd 干净重启

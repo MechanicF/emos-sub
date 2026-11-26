@@ -1,4 +1,4 @@
-// EMOS-gated sing-box gateway v1.5.7 — zero dependencies.
+// EMOS-gated sing-box gateway v1.5.8 — zero dependencies.
 // Node >= 18 (uses global fetch). Run: node server.js  (PORT env, default 3000)
 // Scope: EMOS login -> carrot > 500 -> console (nodes + per-user sub links)
 // + NODE TOTAL traffic only, from https://1e.lol/api/nodes. NO per-user traffic.
@@ -25,7 +25,7 @@ const path = require('path');
 const crypto = require('crypto');
 
 const PORT = parseInt(process.env.PORT || '3000', 10);
-const VERSION = '1.5.7';
+const VERSION = '1.5.8';
 const CONFIG_PATH = path.join(__dirname, 'config', 'nodes.json');
 const CLASH_TEMPLATE_PATH = path.join(__dirname, 'config', 'templates', 'clash.yaml');
 const SINGBOX_TEMPLATE_PATH = path.join(__dirname, 'config', 'templates', 'singbox.json');
@@ -1908,9 +1908,8 @@ td button:last-child{margin-right:0}
 .msg:empty{display:none}
 .warn-card{border-color:var(--line-2)}
 .big-num{font-family:var(--mono);font-size:28px;font-weight:500;line-height:1.1;margin:8px 0}
-.divider{display:flex;align-items:center;gap:12px;color:var(--muted);font-size:12px;margin:20px 0}
-.divider::before,.divider::after{content:"";flex:1;height:1px;background:var(--line)}
 .login-wrap{max-width:400px;margin:40px auto 0}
+#loginCard{max-width:480px;margin:40px auto 24px}
 .login-card{text-align:left}
 .login-card input{text-align:left}
 .lock{width:36px;height:36px;display:flex;align-items:center;justify-content:center;border:1px solid var(--line);border-radius:8px;background:var(--raised);color:var(--text-2);margin:0 0 20px}
@@ -2197,11 +2196,6 @@ const HTML = `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><met
 <div class="card" id="loginCard"><h2>登录</h2>
 <p class="muted">用 EMOS 账号登录，核验萝卜后进入控制台</p>
 <p><a href="/auth/emos"><button type="button" class="big">用 EMOS 账号登录</button></a></p>
-<div class="divider">或使用 Token 登录</div>
-<div class="fallback">
-<label>EMOS Bearer Token</label><input id="token" type="password" placeholder="粘贴 EMOS token" autocomplete="off">
-<button type="button" id="btnToken">用 EMOS Token 登录</button>
-</div>
 <p id="loginMsg" class="msg"></p></div>
 
 <div class="card warn-card hidden" id="gatedCard"><h2>未达标</h2><div id="gatedMsg"></div><p class="muted">萝卜 &gt; <span class="th">500</span> 才能看到节点和订阅链接。去 EMOS 签到 / 赚萝卜后再来。</p></div>
@@ -2226,8 +2220,9 @@ const HTML = `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><met
 function applyTheme(t){document.documentElement.setAttribute("data-theme",t);var b=document.getElementById("btnTheme");if(b)b.textContent=t==="light"?"夜间模式":"白天模式";try{localStorage.setItem("emos-theme",t)}catch(e){}}
 document.getElementById("btnTheme").onclick=function(){applyTheme(document.documentElement.getAttribute("data-theme")==="light"?"dark":"light")};
 applyTheme(document.documentElement.getAttribute("data-theme")||"dark");
-var session=null,subUrls=null,importUrl="";
-function copyText(t,msg){if(navigator.clipboard){navigator.clipboard.writeText(t).then(function(){document.getElementById("copyMsg").textContent=msg||"已复制。"})}else{document.getElementById("copyMsg").textContent=t}}
+var session=null,subUrls=null;
+function legacyCopy(t,ok,fail){var a=document.createElement("textarea");a.value=t;a.setAttribute("readonly","");a.style.position="fixed";a.style.top="-1000px";document.body.appendChild(a);a.select();var done=false;try{done=document.execCommand("copy")}catch(e){}document.body.removeChild(a);done?ok():fail();}
+function copyText(t,msg){var el=document.getElementById("copyMsg");var ok=function(){el.textContent=msg||"已复制。"};var fail=function(){el.textContent="自动复制失败，请手动复制："+t;el.style.userSelect="all";el.style.overflowWrap="anywhere";};if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(t).then(ok,function(){legacyCopy(t,ok,fail)})}else{legacyCopy(t,ok,fail)}}
 function fmtExpiry(v){if(!v)return '—';var d=new Date(v);if(isNaN(d.getTime()))return esc(v);var s=String(v).length>=10?String(v).slice(0,10):d.toISOString().slice(0,10);var days=Math.ceil((d.getTime()-Date.now())/86400000);if(days<0)return s+' <span class="pill bad">已过期</span>';if(days<=14)return s+' <span class="pill bad">剩 '+days+' 天</span>';return s+' <span class="muted">剩 '+days+' 天</span>';}
 function fmt(n){if(n==null)return "-";var u=["B","KB","MB","GB","TB"],i=0;while(n>=1024&&i<u.length-1){n/=1024;i++}return n.toFixed(n>=100?0:1)+" "+u[i]}
 function esc(s){return String(s==null?"":s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/\"/g,"&quot;").replace(/\'/g,"&#39;")}
@@ -2240,32 +2235,10 @@ function setShareInfo(sh){
 var gateThreshold=500;
 function applyThreshold(t){gateThreshold=t;var i,a=document.querySelectorAll(".th");for(i=0;i<a.length;i++)a[i].textContent=t;}
 fetch("/api/public-settings").then(function(r){return r.json();}).then(function(j){if(j&&typeof j.carrot_threshold==="number")applyThreshold(j.carrot_threshold);}).catch(function(){});
-async function doAuth(body){
-  showMsg("核验中…");
-  var r;
-  try{r=await fetch("/api/auth",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});}
-  catch(e){showMsg("登录失败：网络错误，"+e.message);return;}
-  var j=await r.json();
-  if(!j.ok){
-    if(j.reason==="carrot_insufficient"){
-      document.getElementById("gatedCard").classList.remove("hidden");
-      document.getElementById("dash").classList.add("hidden");
-      document.getElementById("gatedMsg").innerHTML="萝卜：<b>"+j.carrot+"</b><div class=\\"big-num bad\\">还差 "+j.shortfall+"</div>才到 "+(j.threshold+1)+"（&gt; "+j.threshold+"）。";
-      showMsg("未达标：萝卜 "+j.carrot+"，还差 "+j.shortfall+"。");
-    }else{showMsg("登录失败：" + (j.error||"未知错误"))}
-    return;
-  }
-  session=j.session;subUrls=j.sub_urls||{singbox:j.sub_url,clash:j.sub_url,links:j.sub_url};importUrl=j.import_url;
-  document.getElementById("gatedCard").classList.add("hidden");
-  document.getElementById("dash").classList.remove("hidden");
-  document.getElementById("loginCard").classList.add("hidden");
-  document.getElementById("who").textContent=j.user_id+(j.username?" ("+j.username+")":"");
-  document.getElementById("carrotOut").textContent=j.carrot;
-  document.getElementById("statCarrot").textContent=j.carrot;
-  document.getElementById("subAuto").textContent=subUrls.c_url||subUrls.url;
-  setShareInfo(j.share);
-  showMsg("已登录，萝卜 "+j.carrot+"。");
-  loadNodes();
+function renderGate(j){
+  document.getElementById("gatedCard").classList.remove("hidden");
+  document.getElementById("dash").classList.add("hidden");
+  document.getElementById("gatedMsg").innerHTML="萝卜：<b>"+esc(j.carrot)+"</b><div class=\\"big-num bad\\">还差 "+esc(j.shortfall)+"</div>才到 "+esc(j.threshold+1)+"（&gt; "+esc(j.threshold)+"）。";
 }
 async function loadNodes(){
   var r;
@@ -2283,14 +2256,13 @@ async function loadNodes(){
   });
   document.getElementById("nodeRows").innerHTML=html||"<tr><td colspan=\\"5\\">暂无节点</td></tr>";
 }
-document.getElementById("btnToken").onclick=function(){var t=document.getElementById("token").value.trim();if(!t){showMsg("先粘贴 EMOS token");return}doAuth({token:t})};
 document.getElementById("btnCopyAuto").onclick=function(){if(subUrls)copyText(subUrls.c_url||subUrls.url,"已复制订阅链接。")};
-document.getElementById("btnRotate").onclick=async function(){var r=await fetch("/api/sub/refresh",{method:"POST",credentials:"include",headers:session?{"X-Session":session}:{}});var j=await r.json();if(!j.ok){showMsg("刷新失败：" + (j.error||""));return}subUrls=j.sub_urls;importUrl=j.import_url;document.getElementById("subAuto").textContent=subUrls.c_url||subUrls.url;setShareInfo(j.share);document.getElementById("copyMsg").textContent="已生成新订阅链接，旧链接立即失效，请重新导入。"};
+document.getElementById("btnRotate").onclick=async function(){var r=await fetch("/api/sub/refresh",{method:"POST",credentials:"include",headers:session?{"X-Session":session}:{}});var j=await r.json();if(!j.ok){showMsg("刷新失败：" + (j.error||""));return}subUrls=j.sub_urls;document.getElementById("subAuto").textContent=subUrls.c_url||subUrls.url;setShareInfo(j.share);document.getElementById("copyMsg").textContent="已生成新订阅链接，旧链接立即失效，请重新导入。"};
 document.getElementById("btnDisable").onclick=async function(){if(!confirm("停用后订阅链接立即失效，重新登录才能恢复，确定？"))return;var r=await fetch("/api/sub/disable",{method:"POST",credentials:"include",headers:session?{"X-Session":session}:{}});var j=await r.json();if(j.ok){setShareInfo(j.share);document.getElementById("copyMsg").textContent="订阅链接已停用。"}};
-document.getElementById("btnImport").onclick=function(){if(importUrl)window.location.href=importUrl};
+document.getElementById("btnImport").onclick=function(){var url=subUrls&&(subUrls.c_url||subUrls.url);if(!url){showMsg("订阅链接还没准备好，请重新登录或稍后再试。");return}copyText(url,"已复制订阅链接，粘贴到客户端即可。");};
 document.getElementById("btnRefresh").onclick=function(){loadNodes()};
-document.getElementById("btnLogout").onclick=async function(){try{await fetch("/api/logout",{method:"POST",credentials:"include",headers:session?{"X-Session":session}:{}});}catch(e){}session=null;subUrls=null;importUrl="";document.getElementById("dash").classList.add("hidden");document.getElementById("gatedCard").classList.add("hidden");document.getElementById("loginCard").classList.remove("hidden");showMsg("已退出登录。")};
-(function(){var q=new URLSearchParams(location.search);var e=q.get("emos_error");if(!e)return;var c=q.get("carrot");var t=parseInt(q.get("threshold"),10)||gateThreshold;var m={no_token:"EMOS 回跳里没有带 token，请重新点“用 EMOS 账号登录”再试一次。",bad_state:"登录状态不对（uuid 不匹配或已过期），请重新点“用 EMOS 账号登录”。",not_signed_in:"EMOS 未确认这次登录（sign/check 未通过：可能是 token 无效，或今天还没在 EMOS 签到），请在 EMOS 登录/签到后再试。",carrot_insufficient:"萝卜不够：当前 "+(c||"?")+"，还差 "+(c?Math.max(0,t+1-c):"?")+" 才到 "+(t+1)+"（> "+t+"）。"};showMsg(m[e]||("登录失败："+e));history.replaceState(null,"",location.pathname);})();
+document.getElementById("btnLogout").onclick=async function(){try{await fetch("/api/logout",{method:"POST",credentials:"include",headers:session?{"X-Session":session}:{}});}catch(e){}session=null;subUrls=null;document.getElementById("dash").classList.add("hidden");document.getElementById("gatedCard").classList.add("hidden");document.getElementById("loginCard").classList.remove("hidden");showMsg("已退出登录。")};
+(function(){var q=new URLSearchParams(location.search);var e=q.get("emos_error");if(!e)return;var c=q.get("carrot");var t=parseInt(q.get("threshold"),10)||gateThreshold;var m={no_token:"EMOS 回跳里没有带 token，请重新点“用 EMOS 账号登录”再试一次。",bad_state:"登录状态不对（uuid 不匹配或已过期），请重新点“用 EMOS 账号登录”。",not_signed_in:"EMOS 未确认这次登录（sign/check 未通过：可能是 token 无效，或今天还没在 EMOS 签到），请在 EMOS 登录/签到后再试。",carrot_insufficient:"萝卜不够：当前 "+(c||"?")+"，还差 "+(c?Math.max(0,t+1-c):"?")+" 才到 "+(t+1)+"（> "+t+"）。"};showMsg(m[e]||("登录失败："+e));if(e==="carrot_insufficient"){var cv=Number(c),ok=isFinite(cv)&&c!=="";renderGate({carrot:ok?cv:"?",shortfall:ok?Math.max(0,t+1-cv):"?",threshold:t});}history.replaceState(null,"",location.pathname);})();
 async function tryResume(){
   try{
     var r=await fetch("/api/nodes",{credentials:"include"});
@@ -2301,7 +2273,6 @@ async function tryResume(){
     var j2=await r2.json();
     if(!j2.ok)return;
     subUrls=j2.sub_urls||{singbox:j2.sub_url,clash:j2.sub_url,links:j2.sub_url};
-    importUrl=j2.import_url;
     document.getElementById("gatedCard").classList.add("hidden");
     document.getElementById("dash").classList.remove("hidden");
     document.getElementById("loginCard").classList.add("hidden");
