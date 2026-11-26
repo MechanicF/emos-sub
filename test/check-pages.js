@@ -154,6 +154,19 @@ const srv = spawnServer(REPO, PORT, { EMOS_STATE_FILE: stateFile('main') });
     if (!consoleHtml.includes('id="subAuto"') || consoleHtml.includes('id="subSingbox"') || consoleHtml.includes('id="subClash"')) {
       fail('console subscription section is not the single auto link');
     } else ok('console shows one auto-adaptive subscription link');
+    // Session-aware first paint: an authenticated reload must not flash the
+    // login card (the session cookie is HttpOnly, so only the server knows).
+    const authedPage = await get(PORT, '/', { 'X-Session': auth.session });
+    const authedRaw = await reqRaw(PORT, 'GET', '/', { 'X-Session': auth.session });
+    if (!consoleHtml.includes('<div class="card" id="loginCard">')) {
+      fail('guest console should show the login card');
+    } else if (!authedPage.includes('<div class="card hidden" id="loginCard">') ||
+               !authedPage.includes('<div id="dash">') ||
+               !authedPage.includes('bootAuthed=true')) {
+      fail('authenticated console should be rendered server-side without a login flash');
+    } else ok('server renders the dashboard for an authenticated reload (no login flash)');
+    if (authedRaw.headers['cache-control'] !== 'no-store') fail('session page must not be cached');
+    else ok('session-specific console is not cached (no-store)');
     // Layout: nodes card above subscription card, with an expiry column.
     if (!consoleHtml.includes('<th>到期</th>') || consoleHtml.indexOf('节点 · 总流量') > consoleHtml.indexOf('订阅链接（每人专属')) {
       fail('console layout: nodes must be above subscription and have an expiry column');

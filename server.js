@@ -1,4 +1,4 @@
-// EMOS-gated sing-box gateway v1.5.10 — zero dependencies.
+// EMOS-gated sing-box gateway v1.5.11 — zero dependencies.
 // Node >= 18 (uses global fetch). Run: node server.js  (PORT env, default 3000)
 // Scope: EMOS login -> carrot > 500 -> console (nodes + per-user sub links)
 // + NODE TOTAL traffic only, from https://1e.lol/api/nodes. NO per-user traffic.
@@ -25,7 +25,7 @@ const path = require('path');
 const crypto = require('crypto');
 
 const PORT = parseInt(process.env.PORT || '3000', 10);
-const VERSION = '1.5.10';
+const VERSION = '1.5.11';
 const CONFIG_PATH = path.join(__dirname, 'config', 'nodes.json');
 const CLASH_TEMPLATE_PATH = path.join(__dirname, 'config', 'templates', 'clash.yaml');
 const SINGBOX_TEMPLATE_PATH = path.join(__dirname, 'config', 'templates', 'singbox.json');
@@ -2206,7 +2206,7 @@ const HTML = `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><met
 <div class="stat"><div class="k">节点</div><div class="v" id="statNodes">—</div><div class="s">订阅内容</div></div>
 <div class="stat"><div class="k">订阅访问</div><div class="v" id="statAccess">—</div><div class="s">本条链接</div></div>
 </div>
-<div class="card"><h2>节点 · 总流量</h2><div class="table-scroll node-table"><table><thead><tr><th>节点</th><th>到期</th><th>状态</th><th>今日</th><th>本月已用 / 限额</th></tr></thead><tbody id="nodeRows"></tbody></table></div></div>
+<div class="card"><h2>节点 · 总流量</h2><div class="table-scroll node-table"><table><thead><tr><th>节点</th><th>到期</th><th>状态</th><th>今日</th><th>本月已用 / 限额</th></tr></thead><tbody id="nodeRows"><tr><td colspan="5" class="muted">正在载入节点…</td></tr></tbody></table></div></div>
 <div class="card"><h2>订阅链接</h2><p>用户：<code id="who"></code> · 萝卜：<b id="carrotOut"></b>（门槛 &gt; <span class="th">500</span>）</p>
 <p class="muted">订阅链接（每人专属，粘贴到客户端即可）：</p>
 <div class="sub-row"><span class="lbl">订阅地址</span><code id="subAuto"></code><button type="button" id="btnCopyAuto">复制</button></div>
@@ -2220,7 +2220,7 @@ const HTML = `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><met
 function applyTheme(t){document.documentElement.setAttribute("data-theme",t);var b=document.getElementById("btnTheme");if(b)b.textContent=t==="light"?"夜间模式":"白天模式";try{localStorage.setItem("emos-theme",t)}catch(e){}}
 document.getElementById("btnTheme").onclick=function(){applyTheme(document.documentElement.getAttribute("data-theme")==="light"?"dark":"light")};
 applyTheme(document.documentElement.getAttribute("data-theme")||"dark");
-var session=null,subUrls=null;
+var session=null,subUrls=null,bootAuthed=false;
 function legacyCopy(t,ok,fail){var a=document.createElement("textarea");a.value=t;a.setAttribute("readonly","");a.style.position="fixed";a.style.top="-1000px";document.body.appendChild(a);a.select();var done=false;try{done=document.execCommand("copy")}catch(e){}document.body.removeChild(a);done?ok():fail();}
 function copyText(t,msg){var el=document.getElementById("copyMsg");var ok=function(){el.textContent=msg||"已复制。"};var fail=function(){el.textContent="自动复制失败，请手动复制："+t;el.style.userSelect="all";el.style.overflowWrap="anywhere";};if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(t).then(ok,function(){legacyCopy(t,ok,fail)})}else{legacyCopy(t,ok,fail)}}
 function fmtExpiry(v){if(!v)return '—';var d=new Date(v);if(isNaN(d.getTime()))return esc(v);var s=String(v).length>=10?String(v).slice(0,10):d.toISOString().slice(0,10);var days=Math.ceil((d.getTime()-Date.now())/86400000);if(days<0)return s+' <span class="pill bad">已过期</span>';if(days<=14)return s+' <span class="pill bad">剩 '+days+' 天</span>';return s+' <span class="muted">剩 '+days+' 天</span>';}
@@ -2261,15 +2261,21 @@ document.getElementById("btnRotate").onclick=async function(){var r=await fetch(
 document.getElementById("btnDisable").onclick=async function(){if(!confirm("停用后订阅链接立即失效，重新登录才能恢复，确定？"))return;var r=await fetch("/api/sub/disable",{method:"POST",credentials:"include",headers:session?{"X-Session":session}:{}});var j=await r.json();if(j.ok){setShareInfo(j.share);document.getElementById("copyMsg").textContent="订阅链接已停用。"}};
 document.getElementById("btnLogout").onclick=async function(){try{await fetch("/api/logout",{method:"POST",credentials:"include",headers:session?{"X-Session":session}:{}});}catch(e){}session=null;subUrls=null;document.getElementById("dash").classList.add("hidden");document.getElementById("gatedCard").classList.add("hidden");document.getElementById("loginCard").classList.remove("hidden");showMsg("已退出登录。")};
 (function(){var q=new URLSearchParams(location.search);var e=q.get("emos_error");if(!e)return;var c=q.get("carrot");var t=parseInt(q.get("threshold"),10)||gateThreshold;var m={no_token:"EMOS 回跳里没有带 token，请重新点“用 EMOS 账号登录”再试一次。",bad_state:"登录状态不对（uuid 不匹配或已过期），请重新点“用 EMOS 账号登录”。",not_signed_in:"EMOS 未确认这次登录（sign/check 未通过：可能是 token 无效，或今天还没在 EMOS 签到），请在 EMOS 登录/签到后再试。",carrot_insufficient:"萝卜不够：当前 "+(c||"?")+"，还差 "+(c?Math.max(0,t+1-c):"?")+" 才到 "+(t+1)+"（> "+t+"）。"};showMsg(m[e]||("登录失败："+e));if(e==="carrot_insufficient"){var cv=Number(c),ok=isFinite(cv)&&c!=="";renderGate({carrot:ok?cv:"?",shortfall:ok?Math.max(0,t+1-cv):"?",threshold:t});}history.replaceState(null,"",location.pathname);})();
+function showLoggedOut(){
+  document.getElementById("dash").classList.add("hidden");
+  document.getElementById("gatedCard").classList.add("hidden");
+  document.getElementById("loginCard").classList.remove("hidden");
+  showMsg("登录状态已失效，请重新登录。");
+}
 async function tryResume(){
   try{
-    var r=await fetch("/api/nodes",{credentials:"include"});
-    if(!r.ok)return;
-    var j=await r.json();
-    if(!j.ok)return;
-    var r2=await fetch("/api/sub-link",{credentials:"include"});
-    var j2=await r2.json();
-    if(!j2.ok)return;
+    var rs=await Promise.all([
+      fetch("/api/nodes",{credentials:"include"}),
+      fetch("/api/sub-link",{credentials:"include"})
+    ]);
+    var j=await rs[0].json(),j2=await rs[1].json();
+    var authGone=rs[0].status===401||rs[1].status===401||rs[1].status===410;
+    if(!rs[0].ok||!j.ok||!rs[1].ok||!j2.ok){if(bootAuthed&&authGone)showLoggedOut();return;}
     subUrls=j2.sub_urls||{singbox:j2.sub_url,clash:j2.sub_url,links:j2.sub_url};
     document.getElementById("gatedCard").classList.add("hidden");
     document.getElementById("dash").classList.remove("hidden");
@@ -2279,19 +2285,43 @@ async function tryResume(){
     document.getElementById("statCarrot").textContent=j.carrot;
     document.getElementById("subAuto").textContent=subUrls.c_url||subUrls.url;
     setShareInfo(j2.share);
-    showMsg("已登录，萝卜 "+j.carrot+"。");
+    if(!bootAuthed)showMsg("已登录，萝卜 "+j.carrot+"。");
     loadNodes();
-  }catch(e){}
+  }catch(e){/* transient network error: keep the server-rendered dashboard */}
 }
 tryResume();
 setInterval(function(){if(!document.getElementById("dash").classList.contains("hidden"))loadNodes()},30000);
 </script></body></html>`;
+// The session cookie is HttpOnly, so JS cannot decide the first paint.
+// Render the authenticated dashboard server-side to avoid a login-card flash.
+function escHtml(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+function renderConsoleHtml(req) {
+  const s = getSession(req);
+  const share = s && s.shareToken ? getShare(s.shareToken) : null;
+  if (!s || !share) return HTML_RENDERED;
+  const urls = subUrls(req, share.token);
+  // urls contains only a validated host and hex tokens; JSON is safe inline.
+  const boot = JSON.stringify(urls);
+  return HTML_RENDERED
+    .replace('<div class="card" id="loginCard">', '<div class="card hidden" id="loginCard">')
+    .replace('<div class="hidden" id="dash">', '<div id="dash">')
+    .replace('<div class="v" id="statCarrot">—</div>', '<div class="v" id="statCarrot">' + escHtml(s.carrot) + '</div>')
+    .replace('<code id="who"></code>', '<code id="who">' + escHtml(s.user_id) + '</code>')
+    .replace('<b id="carrotOut"></b>', '<b id="carrotOut">' + escHtml(s.carrot) + '</b>')
+    .replace('<code id="subAuto"></code>', '<code id="subAuto">' + escHtml(urls.c_url || urls.url) + '</code>')
+    .replace('var session=null,subUrls=null,bootAuthed=false;',
+             'var session=null,subUrls=' + boot + ',bootAuthed=true;');
+}
 const server = http.createServer(async (req, res) => {
   try {
     const u = new URL(req.url, 'http://localhost');
     if (req.method === 'GET' && u.pathname === '/') {
-      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', ...securityHeaders() });
-      return res.end(HTML_RENDERED);
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', ...securityHeaders() });
+      return res.end(renderConsoleHtml(req));
     }
     if (req.method === 'GET' && u.pathname === '/health') return sendJson(res, 200, { ok: true, version: VERSION, nodes: NODES.length });
     if (req.method === 'GET' && u.pathname === '/admin') return handleAdminPage(req, res);
