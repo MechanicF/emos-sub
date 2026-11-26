@@ -184,10 +184,11 @@ const srv = spawnServer(REPO, PORT, { EMOS_STATE_FILE: stateFile('main') });
     if (!mapped.length || !mapped.every((n) => n.expires_at)) {
       fail('/api/nodes did not fill expires_at from probe');
     } else ok('/api/nodes fills expires_at from probe: ' + mapped.map((n) => n.name + '=' + n.expires_at).join(', '));
-    // Button is just 一键导入 now (still the sing-box deep link underneath).
-    if (!consoleHtml.includes('>一键导入</button>') || consoleHtml.includes('一键导入 sing-box')) {
-      fail('console import button label is not 一键导入');
-    } else ok('console import button reads 一键导入');
+    // The "一键导入" button duplicated the copy button and was removed.
+    // Exactly one copy action remains, next to the subscription address.
+    if (!consoleHtml.includes('id="btnCopyAuto"') || consoleHtml.includes('id="btnImport"') || !consoleHtml.includes('>复制</button>')) {
+      fail('console should expose exactly one copy button');
+    } else ok('console has a single copy action (一键导入 removed)');
     // Admin node form has the expiry input.
     const adminHtml = await get(PORT, '/admin');
     if (!adminHtml.includes('id="nodeExpiry"')) fail('admin node form has no expiry input');
