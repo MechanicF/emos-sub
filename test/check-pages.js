@@ -94,6 +94,10 @@ function getUA(p, ua) {
     if (!consoleHtml.includes('<th>到期</th>') || consoleHtml.indexOf('节点 · 总流量') > consoleHtml.indexOf('订阅链接（每人专属')) {
       console.error('FAIL console layout: nodes must be above subscription and have an expiry column'); code = 1;
     } else console.log('OK   console layout: nodes above subscription, expiry column present');
+    // No monitoring columns in the console table (no CPU/uptime/realtime).
+    if (consoleHtml.includes('CPU / 运行') || consoleHtml.includes('状态 / 实时') || consoleHtml.includes('fmtSpeed')) {
+      console.error('FAIL console table still shows CPU/uptime/realtime'); code = 1;
+    } else console.log('OK   console table has no CPU/uptime/realtime columns');
     // /api/nodes exposes expires_at (null for demo nodes without one).
     const nodesRes = await new Promise((res, rej) => {
       const req = http.request({ host: '127.0.0.1', port: PORT, path: '/api/nodes', headers: { 'X-Session': auth.session } }, (r) => {

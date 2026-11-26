@@ -2,7 +2,7 @@
 
 EMOS 登录核验萝卜余额，超过 500 才能进入控制台、领取专属订阅链接。节点流量取自 1e.lol 探针的整机总流量，不做每人用量统计。
 
-当前版本：**v1.3.1**（2026-11-26）
+当前版本：**v1.3.2**（2026-11-26）
 
 零依赖 Node.js（Node ≥ 18），不用 `npm install`。
 
@@ -25,7 +25,7 @@ PORT=3000 ADMIN_TOKEN=你的口令 node server.js
 ```bash
 cd emos-sub            # 或安装目录 /opt/emos-sub
 ./manage.sh update     # 备份配置 → 拉取最新代码 → 重启
-./manage.sh status     # 查看程序版本（v1.3.1）、git 提交、运行状态、端口、健康检查
+./manage.sh status     # 查看程序版本（v1.3.2）、git 提交、运行状态、端口、健康检查
 ```
 
 `update` 只更新代码文件（`server.js`、`manage.sh`、`start.sh`、模板），`.env` 和 `config/`（节点、设置）原样保留，更新前自动备份到 `backups/`。
@@ -127,6 +127,10 @@ curl -fsSL https://raw.githubusercontent.com/MechanicF/emos-sub/main/manage.sh -
 - 后台：`POST /api/admin/login`、`POST /api/admin/logout`、`GET /api/admin/health`、`GET|POST|PUT|DELETE /api/admin/nodes`（含 `/parse`、`/reorder`）、`GET /api/admin/shares`（刷新/停用/启用/吊销/全部吊销）、`GET|PUT /api/admin/settings`
 
 ## 版本历史
+
+### v1.3.2 — 2026-11-26
+
+- 控制台节点表精简：去掉 CPU / 运行时间列和状态里的实时上下行速率，只留节点、到期、状态、今日、本月已用/限额（监控细节看探针即可）
 
 ### v1.3.1 — 2026-11-26
 
