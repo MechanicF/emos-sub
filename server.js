@@ -1,4 +1,4 @@
-// EMOS-gated sing-box gateway v1.1.0 — zero dependencies.
+// EMOS-gated sing-box gateway v1.2.0 — zero dependencies.
 // Node >= 18 (uses global fetch). Run: node server.js  (PORT env, default 3000)
 // Scope: EMOS login -> carrot > 500 -> console (nodes + per-user sub links)
 // + NODE TOTAL traffic only, from https://1e.lol/api/nodes. NO per-user traffic.
@@ -14,7 +14,7 @@ const path = require('path');
 const crypto = require('crypto');
 
 const PORT = parseInt(process.env.PORT || '3000', 10);
-const VERSION = '1.1.0';
+const VERSION = '1.2.0';
 const CONFIG_PATH = path.join(__dirname, 'config', 'nodes.json');
 const CLASH_TEMPLATE_PATH = path.join(__dirname, 'config', 'templates', 'clash.yaml');
 const SINGBOX_TEMPLATE_PATH = path.join(__dirname, 'config', 'templates', 'singbox.json');
@@ -1168,12 +1168,9 @@ async function serveSubscription(req, res, token) {
     const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;');
     const page = '<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>订阅 · EMOS-gated</title>'
       + '<style>body{margin:0;padding:28px 20px 48px;min-height:100vh;color:#eef2f8;font-family:system-ui,-apple-system,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;font-size:15px;line-height:1.55;background:radial-gradient(900px 480px at 12% -10%,rgba(99,102,241,.28),transparent 60%),radial-gradient(760px 480px at 92% 0%,rgba(34,211,238,.15),transparent 55%),linear-gradient(180deg,#0b0f1a,#090d16)}.wrap{max-width:640px;margin:0 auto}.card{background:rgba(255,255,255,.045);border:1px solid rgba(255,255,255,.09);border-radius:16px;padding:18px 20px;margin:14px 0;box-shadow:0 12px 32px rgba(0,0,0,.38)}h1{font-size:21px;margin:0 0 6px}h2{font-size:13px;letter-spacing:.1em;text-transform:uppercase;color:#94a3b8;margin:0 0 8px}a{color:#93c5fd;text-decoration:none}a:hover{text-decoration:underline}code{word-break:break-all;background:rgba(0,0,0,.4);padding:2px 7px;border-radius:6px;font-size:13px}.muted{color:#94a3b8;font-size:13px}</style></head><body><div class="wrap">'
-      + '<h1>订阅链接</h1><p class="muted">专属订阅地址，萝卜 ≤ 500 即失效。请在客户端里粘贴对应链接，不要用浏览器直接下载。</p>'
-      + '<div class="card"><h2>sing-box / Hiddify / Karing</h2><p><a href="' + esc(urls.c_singbox) + '">' + esc(urls.c_singbox) + '</a></p><p><a href="' + esc(urls.import_url) + '">一键导入 sing-box</a></p></div>'
-      + '<div class="card"><h2>Clash / mihomo</h2><p><a href="' + esc(urls.c_clash) + '">' + esc(urls.c_clash) + '</a></p></div>'
-      + '<div class="card"><h2>Surge</h2><p><a href="' + esc(urls.c_surge) + '">' + esc(urls.c_surge) + '</a></p></div>'
-      + '<div class="card"><h2>通用链接（hy2 / vless 列表，Shadowrocket / Loon / Egern 等）</h2><p><a href="' + esc(urls.c_uri) + '">' + esc(urls.c_uri) + '</a></p><p><a href="' + esc(urls.c_v2ray) + '">base64 版</a></p></div>'
-      + '<p class="muted">同一个 token 按客户端分流；Subscription-Userinfo 为节点总流量，不是个人用量；到期时间为本月底 23:59。</p>'
+      + '<h1>订阅链接</h1><p class="muted">专属订阅地址，萝卜 ≤ 500 即失效。请在客户端里粘贴这条链接，不要用浏览器直接下载。</p>'
+      + '<div class="card"><h2>订阅链接（按客户端自动识别）</h2><p><a href="' + esc(urls.c_url) + '">' + esc(urls.c_url) + '</a></p><p><a href="' + esc(urls.import_url) + '">一键导入 sing-box</a></p></div>'
+      + '<p class="muted">同一条链接，FlClash / Clash Verge 返回 Clash，sing-box / Hiddify / Karing 返回 JSON，Surge 返回 Surge 配置，Shadowrocket、Loon 等返回通用链接列表。Subscription-Userinfo 为节点总流量，不是个人用量；到期时间为本月底 23:59。</p>'
       + '</div></body></html>';
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', ...commonHeaders });
     return res.end(page);
@@ -1796,11 +1793,9 @@ code{word-break:break-all;background:rgba(0,0,0,.4);padding:2px 7px;border-radiu
 <div class="stat"><div class="k">订阅访问</div><div class="v" id="statAccess">—</div><div class="s">本条链接</div></div>
 </div>
 <div class="card"><h2>已达标</h2><p>用户：<code id="who"></code> · 萝卜：<b id="carrotOut"></b>（门槛 &gt; 500）</p>
-<p class="muted">订阅链接（每人专属，按客户端选一种）：</p>
-<div class="sub-row"><span class="lbl">sing-box / Hiddify / Karing</span><code id="subSingbox"></code><button type="button" id="btnCopySingbox">复制</button></div>
-<div class="sub-row"><span class="lbl">Clash / mihomo / Verge</span><code id="subClash"></code><button type="button" id="btnCopyClash">复制</button></div>
-<div class="sub-row"><span class="lbl">Surge</span><code id="subSurge"></code><button type="button" id="btnCopySurge">复制</button></div>
-<div class="sub-row"><span class="lbl">通用链接（hy2 / vless）</span><code id="subLinks"></code><button type="button" id="btnCopyLinks">复制</button></div>
+<p class="muted">订阅链接（每人专属，粘贴到客户端即可）：</p>
+<div class="sub-row"><span class="lbl">订阅链接</span><code id="subAuto"></code><button type="button" id="btnCopyAuto">复制</button></div>
+<p class="muted">一条链接全客户端通用，服务端按客户端自动识别格式（FlClash / Clash Verge 返回 Clash，sing-box / Hiddify / Karing 返回 JSON，Surge 返回 Surge 配置，Shadowrocket、Loon 等返回通用链接列表）。</p>
 <p class="muted" id="shareInfo"></p>
 <div class="actions"><button type="button" id="btnImport">一键导入 sing-box</button> <button type="button" class="ghost" id="btnRefresh">刷新流量</button> <button type="button" class="ghost" id="btnRotate">刷新订阅链接（旧链接立即失效）</button> <button type="button" class="ghost" id="btnDisable">停用订阅链接</button> <button type="button" class="ghost" id="btnLogout">退出登录</button></div>
 <p class="muted" id="copyMsg"></p></div>
@@ -1843,10 +1838,7 @@ async function doAuth(body){
   document.getElementById("who").textContent=j.user_id+(j.username?" ("+j.username+")":"");
   document.getElementById("carrotOut").textContent=j.carrot;
   document.getElementById("statCarrot").textContent=j.carrot;
-  document.getElementById("subSingbox").textContent=subUrls.singbox;
-  document.getElementById("subClash").textContent=subUrls.clash;
-  document.getElementById("subSurge").textContent=subUrls.surge||subUrls.c_surge||"";
-  document.getElementById("subLinks").textContent=subUrls.links;
+  document.getElementById("subAuto").textContent=subUrls.c_url||subUrls.url;
   setShareInfo(j.share);
   showMsg("已登录，萝卜 "+j.carrot+"。");
   loadNodes();
@@ -1870,12 +1862,9 @@ async function loadNodes(){
   document.getElementById("nodeRows").innerHTML=html||"<tr><td colspan=\\"5\\">暂无节点</td></tr>";
 }
 document.getElementById("btnToken").onclick=function(){var t=document.getElementById("token").value.trim();if(!t){showMsg("先粘贴 EMOS token");return}doAuth({token:t})};
-document.getElementById("btnCopySingbox").onclick=function(){if(subUrls)copyText(subUrls.singbox,"已复制 sing-box 订阅链接。")};
-document.getElementById("btnCopyClash").onclick=function(){if(subUrls)copyText(subUrls.clash,"已复制 Clash 订阅链接。")};
-document.getElementById("btnCopySurge").onclick=function(){if(subUrls)copyText(subUrls.surge||subUrls.c_surge||"","已复制 Surge 订阅链接。")};
-document.getElementById("btnRotate").onclick=async function(){var r=await fetch("/api/sub/refresh",{method:"POST",credentials:"include",headers:session?{"X-Session":session}:{}});var j=await r.json();if(!j.ok){showMsg("刷新失败：" + (j.error||""));return}subUrls=j.sub_urls;importUrl=j.import_url;document.getElementById("subSingbox").textContent=subUrls.singbox;document.getElementById("subClash").textContent=subUrls.clash;document.getElementById("subSurge").textContent=subUrls.surge||subUrls.c_surge||"";document.getElementById("subLinks").textContent=subUrls.links;setShareInfo(j.share);document.getElementById("copyMsg").textContent="已生成新订阅链接，旧链接立即失效，请重新导入。"};
+document.getElementById("btnCopyAuto").onclick=function(){if(subUrls)copyText(subUrls.c_url||subUrls.url,"已复制订阅链接。")};
+document.getElementById("btnRotate").onclick=async function(){var r=await fetch("/api/sub/refresh",{method:"POST",credentials:"include",headers:session?{"X-Session":session}:{}});var j=await r.json();if(!j.ok){showMsg("刷新失败：" + (j.error||""));return}subUrls=j.sub_urls;importUrl=j.import_url;document.getElementById("subAuto").textContent=subUrls.c_url||subUrls.url;setShareInfo(j.share);document.getElementById("copyMsg").textContent="已生成新订阅链接，旧链接立即失效，请重新导入。"};
 document.getElementById("btnDisable").onclick=async function(){if(!confirm("停用后订阅链接立即失效，重新登录才能恢复，确定？"))return;var r=await fetch("/api/sub/disable",{method:"POST",credentials:"include",headers:session?{"X-Session":session}:{}});var j=await r.json();if(j.ok){setShareInfo(j.share);document.getElementById("copyMsg").textContent="订阅链接已停用。"}};
-document.getElementById("btnCopyLinks").onclick=function(){if(subUrls)copyText(subUrls.links,"已复制通用 hy2 订阅链接。")};
 document.getElementById("btnImport").onclick=function(){if(importUrl)window.location.href=importUrl};
 document.getElementById("btnRefresh").onclick=function(){loadNodes()};
 document.getElementById("btnLogout").onclick=async function(){try{await fetch("/api/logout",{method:"POST",credentials:"include",headers:session?{"X-Session":session}:{}});}catch(e){}session=null;subUrls=null;importUrl="";document.getElementById("dash").classList.add("hidden");document.getElementById("gatedCard").classList.add("hidden");document.getElementById("loginCard").classList.remove("hidden");showMsg("已退出登录。")};
@@ -1897,10 +1886,7 @@ async function tryResume(){
     document.getElementById("who").textContent=j.user_id;
     document.getElementById("carrotOut").textContent=j.carrot;
     document.getElementById("statCarrot").textContent=j.carrot;
-    document.getElementById("subSingbox").textContent=subUrls.singbox;
-    document.getElementById("subClash").textContent=subUrls.clash;
-    document.getElementById("subSurge").textContent=subUrls.surge||subUrls.c_surge||"";
-    document.getElementById("subLinks").textContent=subUrls.links;
+    document.getElementById("subAuto").textContent=subUrls.c_url||subUrls.url;
     setShareInfo(j2.share);
     showMsg("已登录，萝卜 "+j.carrot+"。");
     loadNodes();

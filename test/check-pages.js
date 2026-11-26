@@ -30,6 +30,11 @@ function postJson(p, body) {
     req.on('error', rej); req.end(data);
   });
 }
+function getUA(p, ua) {
+  return new Promise((res, rej) => http.get({ host: '127.0.0.1', port: PORT, path: p, headers: { 'User-Agent': ua } }, (r) => {
+    let d = ''; r.on('data', (c) => (d += c)); r.on('end', () => res(d));
+  }).on('error', rej));
+}
 (async () => {
   let code = 0;
   try {
@@ -66,6 +71,25 @@ function postJson(p, body) {
     const sb = JSON.parse(await get('/c/?token=' + encodeURIComponent(auth.sub_token) + '&client=sing-box'));
     if (!Array.isArray(sb.outbounds) || !sb.outbounds.length) { console.error('FAIL sing-box output has no outbounds'); code = 1; }
     else console.log('OK   /c/?client=sing-box parses, ' + sb.outbounds.length + ' outbounds');
+    // One auto-adaptive link: /c/?token= with no client param sniffs UA.
+    const auto = '/c/?token=' + encodeURIComponent(auth.sub_token);
+    const asFlclash = await getUA(auto, 'FlClash/0.8.0 (Android)');
+    if (!asFlclash.includes('proxy-groups:')) { console.error('FAIL /c/ with FlClash UA did not return Clash YAML'); code = 1; }
+    else console.log('OK   /c/ + FlClash UA -> Clash YAML');
+    const asSingbox = await getUA(auto, 'sing-box/1.12.0');
+    try {
+      const j = JSON.parse(asSingbox);
+      if (!Array.isArray(j.outbounds) || !j.outbounds.length) throw new Error('no outbounds');
+      console.log('OK   /c/ + sing-box UA -> JSON, ' + j.outbounds.length + ' outbounds');
+    } catch (e) { console.error('FAIL /c/ with sing-box UA did not return JSON: ' + e.message); code = 1; }
+    const asBrowser = await getUA(auto, 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36');
+    if (!asBrowser.includes('按客户端自动识别')) { console.error('FAIL /c/ with browser UA did not return chooser page'); code = 1; }
+    else console.log('OK   /c/ + browser UA -> chooser page with single link');
+    // Console shows one subscription link, not four per-client rows.
+    const consoleHtml = await get('/');
+    if (!consoleHtml.includes('id="subAuto"') || consoleHtml.includes('id="subSingbox"') || consoleHtml.includes('id="subClash"')) {
+      console.error('FAIL console subscription section is not the single auto link'); code = 1;
+    } else console.log('OK   console shows one auto-adaptive subscription link');
   } catch (e) { console.error('FAIL', e.message); code = 1; }
   srv.kill();
   process.exit(code);

@@ -2,7 +2,7 @@
 
 EMOS 登录核验萝卜余额，超过 500 才能进入控制台、领取专属订阅链接。节点流量取自 1e.lol 探针的整机总流量，不做每人用量统计。
 
-当前版本：**v1.1.0**（2026-11-26）
+当前版本：**v1.2.0**（2026-11-26）
 
 零依赖 Node.js（Node ≥ 18），不用 `npm install`。
 
@@ -25,7 +25,7 @@ PORT=3000 ADMIN_TOKEN=你的口令 node server.js
 ```bash
 cd emos-sub            # 或安装目录 /opt/emos-sub
 ./manage.sh update     # 备份配置 → 拉取最新代码 → 重启
-./manage.sh status     # 查看程序版本（v1.1.0）、git 提交、运行状态、端口、健康检查
+./manage.sh status     # 查看程序版本（v1.2.0）、git 提交、运行状态、端口、健康检查
 ```
 
 `update` 只更新代码文件（`server.js`、`manage.sh`、`start.sh`、模板），`.env` 和 `config/`（节点、设置）原样保留，更新前自动备份到 `backups/`。
@@ -78,7 +78,7 @@ curl -fsSL https://raw.githubusercontent.com/MechanicF/emos-sub/main/manage.sh -
 **用户（控制台 `/`）：**
 
 1. 点“用 EMOS 账号登录”，跳到 EMOS（emos.best）登录，登录完自动跳回本站；服务端验 token（`sign/check` + `carrot/current`），萝卜 > 500 放行。
-2. 控制台显示节点总流量（探针）和三条订阅链接：sing-box / Clash / Surge，另有通用链接（hy2 / vless 列表）和一键导入 sing-box。
+2. 控制台显示节点总流量（探针）和一条订阅链接（全客户端通用，见下）与一键导入 sing-box。
 3. 订阅链接每人专属，绑定 EMOS `user_id`，可刷新（旧链接立即失效）或停用。登录后登录卡片自动隐藏，右上角“退出登录”结束会话。
 4. 备用登录：手动粘贴 EMOS Bearer Token。
 
@@ -90,21 +90,23 @@ curl -fsSL https://raw.githubusercontent.com/MechanicF/emos-sub/main/manage.sh -
 
 ## 订阅格式
 
-消费地址（sublinkPro 风格）：`GET /c/?token=<shareToken>&client=<client>`，`client` 按 User-Agent 自动识别，也可强制指定；`/sub/:token?format=` 同样可用。浏览器打开订阅地址会显示说明页。
+每人只有一条订阅链接（sublinkPro 风格）：`GET /c/?token=<shareToken>`，不带 `client` 参数，服务端按请求方的 User-Agent 自动返回对应格式；浏览器打开它显示说明页（同样只有一条链接）。想手动指定格式可以加 `?client=<格式>`（`/sub/:token?format=<格式>` 同样可用）。
 
-| client | 格式 |
+| 客户端（按 UA 识别） | 返回格式 |
 | --- | --- |
-| `sing-box` / `json` | sing-box JSON |
-| `clash` / `mihomo` | Clash YAML |
-| `surge` | Surge 配置 |
-| `v2ray` / `b64` | base64 订阅 |
-| `uri` / `links` | hy2 / vless 链接列表 |
+| FlClash、Clash、mihomo、Clash Verge | Clash YAML |
+| sing-box、Hiddify、Karing | sing-box JSON |
+| Surge | Surge 配置 |
+| Shadowrocket、Loon、Egern、Stash、Quantumult、NekoBox 等 | hy2 / vless 链接列表 |
+| 其他 / 未知 UA | 链接列表 |
+
+`?client=` 可取值：`clash` / `mihomo`、`sing-box` / `json`、`surge`、`v2ray` / `b64`（base64 订阅）、`uri` / `links`（链接列表）。
 
 支持 `hy2://`、`hysteria2://`、`vless://`（含 REALITY 与 VLESS Encryption）。命名规则默认 `[$Flag] $LinkCountryName - $Name`，重名自动加序号。
 
 **Clash 分流（ACL4SSR AdblockPlus）：** Clash 输出用的就是 ACL4SSR 的 `ACL4SSR_AdblockPlus.ini` 那套规则。注意这个 `.ini` 本身不是 Clash YAML 模板，是 Sub-Store/ACL 定义（`ruleset=<分组>,<规则列表>` + `custom_proxy_group=`）；服务端按它合并生成 Clash 配置：15 个规则列表（去广告、应用净化、微软、苹果、国外媒体、电报、国内直连等）变成 `rule-providers`（客户端从 `raw.githubusercontent.com/ACL4SSR/ACL4SSR` 拉取，每天更新一次），分组沿用 `.ini` 里的名字和顺序（🚀 节点选择、♻️ 自动选择、🌍 国外媒体、📲 电报信息、Ⓜ️ 微软服务、🍎 苹果服务、🎯 全球直连、🛑 全球拦截、🍃 应用净化、🆎 AdBlock、🐟 漏网之鱼），最后 `GEOIP,CN` 直连、`MATCH` 走漏网之鱼。模板文件在 `config/templates/clash.yaml`（占位 `{{PROXIES}}` `{{GROUPS}}` `{{RULE_PROVIDERS}}` `{{RULES}}`），删掉会回退到 `server.js` 里的内置模板。
 
-**FlClash 没节点时先查这三点：** ① 必须用控制台里“Clash / mihomo / Verge”那条链接（`/c/?token=...&client=clash`），sing-box JSON、通用链接（纯文本链接列表）FlClash 读不了；② 链接里的 token 有效期 24 小时，过期或在控制台点了“刷新订阅链接”后旧链接立即失效，重新登录拿新的；③ 服务器端口要在防火墙放行，浏览器能打开订阅地址并看到 YAML 才算通。已用 mihomo v1.19.34（FlClash 同款核心）`mihomo -t` 验过实发 Clash 配置：2 个节点（VLESS REALITY + hy2）+ 11 个分组 + 15 个 rule-providers + 17 条规则全部通过；`GEOIP,CN` 需要客户端自带 GeoIP 数据库（FlClash 自带）。
+**FlClash 没节点时先查这三点：** ① 必须用控制台里那条唯一的订阅链接（`/c/?token=...`，不带 `client` 参数，FlClash 的 UA 会自动识别为 Clash）；不要用 `?format=singbox` 的 JSON 链接或通用链接；② 链接里的 token 有效期 24 小时，过期或在控制台点了“刷新订阅链接”后旧链接立即失效，重新登录拿新的；③ 服务器端口要在防火墙放行，浏览器能打开订阅地址并看到 YAML 才算通。已用 mihomo v1.19.34（FlClash 同款核心）`mihomo -t` 验过实发 Clash 配置：2 个节点（VLESS REALITY + hy2）+ 11 个分组 + 15 个 rule-providers + 17 条规则全部通过；`GEOIP,CN` 需要客户端自带 GeoIP 数据库（FlClash 自带）。
 
 响应头带节点总流量的 `Subscription-Userinfo`（到期时间为本月底 23:59），`Cache-Control: private, no-store`；Clash 另带 `profile-update-interval: 24`。反代须透传 User-Agent。
 
@@ -125,6 +127,11 @@ curl -fsSL https://raw.githubusercontent.com/MechanicF/emos-sub/main/manage.sh -
 - 后台：`POST /api/admin/login`、`POST /api/admin/logout`、`GET /api/admin/health`、`GET|POST|PUT|DELETE /api/admin/nodes`（含 `/parse`、`/reorder`）、`GET /api/admin/shares`（刷新/停用/启用/吊销/全部吊销）、`GET|PUT /api/admin/settings`
 
 ## 版本历史
+
+### v1.2.0 — 2026-11-26
+
+- 订阅链接整合成一条：控制台和浏览器说明页都只显示 `/c/?token=...`，服务端按 User-Agent 自动识别客户端（FlClash / Clash Verge → Clash，sing-box / Hiddify / Karing → JSON，Surge → Surge 配置，Shadowrocket、Loon 等 → 链接列表）；`?client=` / `?format=` 仍可手动指定格式
+- 回归测试增加 UA 嗅探检查（FlClash UA → Clash YAML，sing-box UA → JSON，浏览器 UA → 说明页）
 
 ### v1.1.0 — 2026-11-26
 
