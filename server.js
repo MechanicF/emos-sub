@@ -1,4 +1,4 @@
-// EMOS-gated sing-box gateway — prototype, zero dependencies.
+// EMOS-gated sing-box gateway v1.0.0 — zero dependencies.
 // Node >= 18 (uses global fetch). Run: node server.js  (PORT env, default 3000)
 // Scope: EMOS login -> carrot > 500 -> console (nodes + per-user sub links)
 // + NODE TOTAL traffic only, from https://1e.lol/api/nodes. NO per-user traffic.
@@ -14,6 +14,7 @@ const path = require('path');
 const crypto = require('crypto');
 
 const PORT = parseInt(process.env.PORT || '3000', 10);
+const VERSION = '1.0.0';
 const CONFIG_PATH = path.join(__dirname, 'config', 'nodes.json');
 const CLASH_TEMPLATE_PATH = path.join(__dirname, 'config', 'templates', 'clash.yaml');
 const SINGBOX_TEMPLATE_PATH = path.join(__dirname, 'config', 'templates', 'singbox.json');
@@ -687,7 +688,7 @@ function buildSurgeConfig(req, token) {
 // client= wins over ?format=. Browsers (no client UA) get 'html'.
 // UA notes: surge -> surge; loon/egern/stash/surfboard/shadowrocket/quanx
 // -> uri (in sublinkPro these expanded formats need the Sub-Store sidecar;
-// this prototype returns the plain hy2 URI list for them, not a full
+// this build returns the plain hy2 URI list for them, not a full
 // conversion — see README).
 function resolveClient(req) {
   const u = new URL(req.url, 'http://localhost');
@@ -930,11 +931,12 @@ async function handleAuth(req, res) {
   if (token) {
     try { result = await emosCheck(token); }
     catch (e) { return sendJson(res, 502, { ok: false, error: 'EMOS check failed: ' + e.message }); }
-  } else if (Number.isFinite(demoCarrot)) {
+  } else if (Number.isFinite(demoCarrot) && process.env.DEMO_ENABLED === '1') {
+    // Demo login is off by default; enable only for local testing with DEMO_ENABLED=1.
     demo = true;
     result = { carrot: demoCarrot, user_id: 'demo-user', username: 'demo-user' };
   } else {
-    return sendJson(res, 400, { ok: false, error: 'Provide {token} (EMOS Bearer token) or {carrot} (demo only)' });
+    return sendJson(res, 400, { ok: false, error: 'Provide {token} (EMOS Bearer token)' });
   }
 
   const carrot = result.carrot;
@@ -1101,12 +1103,12 @@ async function serveSubscription(req, res, token) {
     const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;');
     const page = '<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>订阅 · EMOS-gated</title>'
       + '<style>body{margin:0;padding:28px 20px 48px;min-height:100vh;color:#eef2f8;font-family:system-ui,-apple-system,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;font-size:15px;line-height:1.55;background:radial-gradient(900px 480px at 12% -10%,rgba(99,102,241,.28),transparent 60%),radial-gradient(760px 480px at 92% 0%,rgba(34,211,238,.15),transparent 55%),linear-gradient(180deg,#0b0f1a,#090d16)}.wrap{max-width:640px;margin:0 auto}.card{background:rgba(255,255,255,.045);border:1px solid rgba(255,255,255,.09);border-radius:16px;padding:18px 20px;margin:14px 0;box-shadow:0 12px 32px rgba(0,0,0,.38)}h1{font-size:21px;margin:0 0 6px}h2{font-size:13px;letter-spacing:.1em;text-transform:uppercase;color:#94a3b8;margin:0 0 8px}a{color:#93c5fd;text-decoration:none}a:hover{text-decoration:underline}code{word-break:break-all;background:rgba(0,0,0,.4);padding:2px 7px;border-radius:6px;font-size:13px}.muted{color:#94a3b8;font-size:13px}</style></head><body><div class="wrap">'
-      + '<h1>订阅链接</h1><p class="muted">这是你的专属订阅地址（分享链接有效期见控制台，萝卜掉到 ≤ 500 即失效）。请在客户端里粘贴对应的链接，不要用浏览器直接下载——浏览器不知道该用什么客户端打开。</p>'
+      + '<h1>订阅链接</h1><p class="muted">专属订阅地址，萝卜 ≤ 500 即失效。请在客户端里粘贴对应链接，不要用浏览器直接下载。</p>'
       + '<div class="card"><h2>sing-box / Hiddify / Karing</h2><p><a href="' + esc(urls.c_singbox) + '">' + esc(urls.c_singbox) + '</a></p><p><a href="' + esc(urls.import_url) + '">一键导入 sing-box</a></p></div>'
       + '<div class="card"><h2>Clash / mihomo</h2><p><a href="' + esc(urls.c_clash) + '">' + esc(urls.c_clash) + '</a></p></div>'
       + '<div class="card"><h2>Surge</h2><p><a href="' + esc(urls.c_surge) + '">' + esc(urls.c_surge) + '</a></p></div>'
       + '<div class="card"><h2>通用链接（hy2 / vless 列表，Shadowrocket / Loon / Egern 等）</h2><p><a href="' + esc(urls.c_uri) + '">' + esc(urls.c_uri) + '</a></p><p><a href="' + esc(urls.c_v2ray) + '">base64 版</a></p></div>'
-      + '<p class="muted">同一个 token，/c/?client= 按客户端分流（sublinkPro 风格）；/sub/&lt;token&gt;?format= 同样可用。流量头 Subscription-Userinfo 是节点总流量（探针里各节点本月上行/下行/限额之和），不是你个人的用量；到期时间为本月底 23:59。</p>'
+      + '<p class="muted">同一个 token 按客户端分流；Subscription-Userinfo 为节点总流量，不是个人用量；到期时间为本月底 23:59。</p>'
       + '</div></body></html>';
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', ...commonHeaders });
     return res.end(page);
@@ -1172,7 +1174,7 @@ function handleAdminPage(req, res) {
   // Returning a bare 503 page here used to leave the user with no way to
   // tell a misconfiguration from a broken login form.
   res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-  return res.end(ADMIN_HTML);
+  return res.end(ADMIN_HTML.split('{{VERSION}}').join(VERSION));
 }
 async function handleAdminApi(req, res) {
   const u = new URL(req.url, 'http://localhost');
@@ -1336,7 +1338,7 @@ async function handleAdminApi(req, res) {
   // ---- Health ----
   if (req.method === 'GET' && p === '/api/admin/health') {
     const probe = await fetchProbe();
-    return sendJson(res, 200, { ok: true, admin_configured: !!ADMIN_TOKEN, nodes: NODES.length, shares: shares.size, sessions: sessions.size, probe_source: probe.source, probe_nodes: probe.data ? probe.data.length : 0, uptime_seconds: Math.floor(process.uptime()), carrot_threshold: CARROT_THRESHOLD });
+    return sendJson(res, 200, { ok: true, version: VERSION, admin_configured: !!ADMIN_TOKEN, nodes: NODES.length, shares: shares.size, sessions: sessions.size, probe_source: probe.source, probe_nodes: probe.data ? probe.data.length : 0, uptime_seconds: Math.floor(process.uptime()), carrot_threshold: CARROT_THRESHOLD });
   }
   return sendJson(res, 404, { ok: false, error: 'unknown admin endpoint' });
 }
@@ -1428,19 +1430,19 @@ pre{background:rgba(0,0,0,.4);border:1px solid var(--border);border-radius:10px;
 .section-head{display:flex;align-items:baseline;justify-content:space-between;gap:10px;flex-wrap:wrap}
 @media (max-width:640px){body{padding:18px 12px 36px}.card{padding:16px}.form-grid{grid-template-columns:1fr}.stat{min-width:calc(50% - 6px)}}
 </style></head><body><div class="wrap">
-<div class="topbar"><div class="brand-mark"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 3 7v6c0 5 4 8 9 9 5-1 9-4 9-9V7l-9-5z"/><path d="M9 12l2 2 4-4"/></svg></div><div><h1>后台管理</h1><p class="subtitle">EMOS 订阅网关 · 只有站长能进</p></div><span class="pill accent" style="margin-left:auto">站长后台</span><button type="button" class="ghost" id="btnTheme" style="margin:0 0 0 8px">白天模式</button></div>
-<p class="muted">管理节点（订阅内容）、分享链接、设置。用户控制台在 <a href="/">/</a>，节点改完订阅立即生效，不用重启。</p>
+<div class="topbar"><div class="brand-mark"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 3 7v6c0 5 4 8 9 9 5-1 9-4 9-9V7l-9-5z"/><path d="M9 12l2 2 4-4"/></svg></div><div><h1>后台管理</h1><p class="subtitle">EMOS 订阅网关 · 只有站长能进</p></div><span class="pill accent" style="margin-left:auto">站长后台 · {{VERSION}}</span><button type="button" class="ghost" id="btnTheme" style="margin:0 0 0 8px">白天模式</button></div>
+<p class="muted">管理节点、分享链接与设置，改动立即生效。</p>
 
 <div class="card warn-card hidden" id="unconfiguredCard"><h2>后台未配置</h2>
-<p style="margin:0 0 6px">服务器启动时没有设置 <code>ADMIN_TOKEN</code>，所以后台登录永远不可能成功 —— 不是口令错了，是根本没配口令。</p>
-<p class="muted" style="margin:0 0 4px">停掉当前服务，用下面这条命令重新启动（把“你的口令”换成你自己的口令），然后重新打开 /admin：</p>
+<p style="margin:0 0 6px">服务器启动时未设置 <code>ADMIN_TOKEN</code>。</p>
+<p class="muted" style="margin:0 0 4px">用以下命令重新启动（替换为你的口令），然后重新打开 /admin：</p>
 <div class="cmd"><code>ADMIN_TOKEN=你的口令 node server.js</code><button type="button" class="ghost" id="btnCopyCmd">复制</button></div>
 <p class="muted" style="margin:0">也可以用控制脚本：<code>./manage.sh install --admin-token 你的口令</code>。口令不要写进任何文件或聊天记录。</p>
 <p><button type="button" id="btnRecheck">重新检查</button></p></div>
 
 <div class="login-wrap hidden" id="loginWrap"><div class="card login-card" id="loginCard">
 <div class="lock"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg></div>
-<h2>站长登录</h2><p class="muted">输入启动服务时设置的管理员口令（ADMIN_TOKEN）</p>
+<h2>站长登录</h2><p class="muted">输入管理员口令（ADMIN_TOKEN）</p>
 <label for="adminToken" style="text-align:left">管理员口令</label>
 <input id="adminToken" type="password" placeholder="输入 ADMIN_TOKEN" autocomplete="off">
 <button type="button" id="btnAdminLogin">登录</button>
@@ -1453,25 +1455,25 @@ pre{background:rgba(0,0,0,.4);border:1px solid var(--border);border-radius:10px;
 <div class="card"><div class="section-head"><h2>节点 <span class="count" id="nodeCount"></span></h2><span class="pill" id="probeNote"></span></div>
 <div class="table-scroll"><table><thead><tr><th>Key</th><th>名称</th><th>协议</th><th>服务器</th><th>探针</th><th>操作</th></tr></thead><tbody id="nodeRows"></tbody></table></div>
 <h2 id="formTitle" style="margin-top:24px">添加节点</h2>
-<label>节点链接（hy2:// / hysteria2:// / vless://，粘贴后先点“解析预览”，确认无误再保存）</label>
+<label>节点链接（hy2:// / hysteria2:// / vless://）</label>
 <textarea id="nodeLink" rows="3" placeholder="hysteria2://密码@域名:端口?sni=域名&obfs=salamander&obfs-password=xxx#名字"></textarea>
-<div class="row"><div><label>显示名（可空，默认用链接里的名字）</label><input id="nodeName" placeholder="例如 PSM-sb-hy2-opju"></div>
-<div><label>地区代码（可空，如 HK / JP / US）</label><input id="nodeRegion" placeholder="JP"></div></div>
-<div class="row"><div><label>探针 id（可空，不在探针里就留空）</label><input id="nodeProbe" type="number" placeholder="20"></div>
-<div><label>Key（可空，自动生成，唯一）</label><input id="nodeKey" placeholder="hy2-jp-xxx"></div></div>
+<div class="row"><div><label>显示名（可选）</label><input id="nodeName" placeholder="例如 PSM-sb-hy2-opju"></div>
+<div><label>地区代码（可选，如 HK / JP / US）</label><input id="nodeRegion" placeholder="JP"></div></div>
+<div class="row"><div><label>探针 id（可选）</label><input id="nodeProbe" type="number" placeholder="20"></div>
+<div><label>Key（可选，自动生成）</label><input id="nodeKey" placeholder="hy2-jp-xxx"></div></div>
 <button type="button" id="btnParse">解析预览</button> <button type="button" id="btnSaveNode">保存节点</button> <button type="button" class="ghost hidden" id="btnCancelEdit">取消编辑</button>
 <pre id="nodePreview" class="hidden"></pre><p id="nodeMsg" class="msg"></p></div>
 
 <div class="card"><h2>分享链接（订阅）</h2>
-<p class="muted" style="margin-top:0">分享由用户 EMOS 登录后自动创建（每人一条，绑定 user_id），后台不能凭空给某人发一条。token 只显示前 6 位；刷新会让旧链接立即失效，停用后用户重新登录才能恢复。</p>
+<p class="muted" style="margin-top:0">用户登录后自动创建，每人一条；Token 仅显示前 6 位。</p>
 <div class="table-scroll"><table><thead><tr><th>Token</th><th>用户</th><th>创建 / 到期</th><th>状态</th><th>访问</th><th>最后 IP / 访问</th><th>操作</th></tr></thead><tbody id="shareRows"></tbody></table></div>
 <p><button type="button" class="danger" id="btnRevokeAll">全部吊销（所有订阅立即失效）</button></p><p id="shareMsg" class="msg"></p></div>
 
 <div class="card"><h2>设置</h2>
 <div class="form-grid">
-<div><label>萝卜门槛（carrot 必须 &gt; 此值，默认 500）</label><input id="setThreshold" type="number"></div>
-<div><label>分享有效期（小时，0 = 永不过期，默认 24）</label><input id="setTtl" type="number" step="any"></div>
-<div><label>探针缓存（秒，默认 30）</label><input id="setProbeCache" type="number"></div>
+<div><label>萝卜门槛（默认 500）</label><input id="setThreshold" type="number"></div>
+<div><label>分享有效期（小时，0 = 永不过期）</label><input id="setTtl" type="number" step="any"></div>
+<div><label>探针缓存（秒）</label><input id="setProbeCache" type="number"></div>
 <div><label>节点命名规则</label><input id="setNameRule"></div>
 </div>
 <p class="muted" id="setSources"></p>
@@ -1629,7 +1631,7 @@ initAdmin();
 </script></body></html>`;
 
 // --- console HTML (single page, no dependencies) -------------------------
-const HTML = `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>EMOS 订阅控制台 · 原型</title><script>try{var t=localStorage.getItem("emos-theme");if(t==="light"||t==="dark")document.documentElement.setAttribute("data-theme",t)}catch(e){}</script><style>
+const HTML = `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>EMOS 订阅控制台</title><script>try{var t=localStorage.getItem("emos-theme");if(t==="light"||t==="dark")document.documentElement.setAttribute("data-theme",t)}catch(e){}</script><style>
 :root{--bg:#0a0e17;--card:rgba(255,255,255,.045);--card-solid:#121826;--border:rgba(255,255,255,.09);--text:#eef2f8;--muted:#94a3b8;--faint:#64748b;--accent:#6366f1;--accent2:#22d3ee;--grad:linear-gradient(135deg,#6366f1,#8b5cf6 48%,#22d3ee);--green:#34d399;--green-bg:rgba(52,211,153,.13);--red:#f87171;--red-bg:rgba(248,113,113,.13);--amber:#fbbf24;--amber-bg:rgba(251,191,36,.12);--radius:16px;--shadow:0 12px 32px rgba(0,0,0,.38)}
 html[data-theme="light"]{--bg:#f1f5f9;--card:rgba(255,255,255,.82);--card-solid:#ffffff;--border:rgba(15,23,42,.12);--text:#0f172a;--muted:#64748b;--faint:#94a3b8;--accent:#4f46e5;--accent2:#0891b2;--green:#059669;--green-bg:rgba(5,150,105,.12);--red:#dc2626;--red-bg:rgba(220,38,38,.08);--amber:#b45309;--amber-bg:rgba(180,83,9,.1);--shadow:0 10px 28px rgba(15,23,42,.1)}
 html[data-theme="light"] body{background:radial-gradient(900px 480px at 12% -10%,rgba(99,102,241,.16),transparent 60%),radial-gradient(760px 480px at 92% 0%,rgba(34,211,238,.12),transparent 55%),linear-gradient(180deg,#f8fafc,#edf1f7)}
@@ -1707,20 +1709,16 @@ code{word-break:break-all;background:rgba(0,0,0,.4);padding:2px 7px;border-radiu
 .msg{font-size:13px;color:var(--muted);margin:10px 0 0;min-height:18px}
 @media (max-width:640px){body{padding:18px 12px 36px}.card{padding:16px}.stat{min-width:calc(50% - 6px)}.sub-row{flex-wrap:wrap}.sub-row .lbl{width:100%}.sub-row code{white-space:normal}}
 </style></head><body><div class="wrap">
-<div class="topbar"><div class="brand-mark"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 4 14h6l-1 8 9-12h-6l1-8z"/></svg></div><div><h1>EMOS 订阅控制台</h1><p class="subtitle">EMOS 登录 · 萝卜 &gt; 500 解锁订阅</p></div><span class="pill accent" style="margin-left:auto">原型</span><button type="button" class="ghost" id="btnTheme" style="margin:0 0 0 8px">白天模式</button></div>
-<p class="muted">EMOS 登录 → 萝卜 &gt; 500 才能进控制台。节点流量是探针里的整台服务器流量（不是单条节点、不是每人用量）。</p>
+<div class="topbar"><div class="brand-mark"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 4 14h6l-1 8 9-12h-6l1-8z"/></svg></div><div><h1>EMOS 订阅控制台</h1><p class="subtitle">EMOS 登录 · 萝卜 &gt; 500 解锁订阅</p></div><span class="pill accent" style="margin-left:auto">{{VERSION}}</span><button type="button" class="ghost" id="btnTheme" style="margin:0 0 0 8px">白天模式</button></div>
+<p class="muted">萝卜 &gt; 500 才能进入控制台；节点流量为探针整机总流量。</p>
 
 <div class="card hero" id="loginCard"><h2>登录</h2>
 <p class="muted">用你的 EMOS 账号登录，核验萝卜后进入控制台</p>
 <p><a href="/auth/emos"><button type="button" class="big">用 EMOS 账号登录</button></a></p>
-<p class="muted">点上面会跳到 EMOS（emos.best）登录，登录完自动跳回来，全程不用复制 token。第一次用建议走这里。</p>
-<div class="divider">备用登录</div>
+<div class="divider">或使用 Token 登录</div>
 <div class="fallback">
-<label>EMOS Bearer Token（真实模式）</label><input id="token" type="password" placeholder="粘贴 EMOS token（只发给本服务器，不会保存到聊天记录）" autocomplete="off">
+<label>EMOS Bearer Token</label><input id="token" type="password" placeholder="粘贴 EMOS token" autocomplete="off">
 <button type="button" id="btnToken">用 EMOS Token 登录</button>
-<p class="muted">或演示模式：直接填萝卜数，不调 EMOS。</p>
-<label>演示萝卜数</label><input id="demoCarrot" type="number" value="600">
-<button type="button" id="btnDemo">演示登录</button> <button type="button" class="ghost" id="btnDemo600">演示：600（达标）</button> <button type="button" class="ghost" id="btnDemo400">演示：400（不达标）</button>
 </div>
 <p id="loginMsg" class="msg"></p></div>
 
@@ -1732,13 +1730,12 @@ code{word-break:break-all;background:rgba(0,0,0,.4);padding:2px 7px;border-radiu
 <div class="stat"><div class="k">节点</div><div class="v" id="statNodes">—</div><div class="s">订阅内容</div></div>
 <div class="stat"><div class="k">订阅访问</div><div class="v" id="statAccess">—</div><div class="s">本条链接</div></div>
 </div>
-<div class="card"><h2>已达标 <span id="demoBadge"></span></h2><p>用户：<code id="who"></code> · 萝卜：<b id="carrotOut"></b>（门槛 &gt; 500）</p>
-<p class="muted">订阅链接（每人专属，24 小时有效；按客户端选一种粘贴）：</p>
+<div class="card"><h2>已达标</h2><p>用户：<code id="who"></code> · 萝卜：<b id="carrotOut"></b>（门槛 &gt; 500）</p>
+<p class="muted">订阅链接（每人专属，按客户端选一种）：</p>
 <div class="sub-row"><span class="lbl">sing-box / Hiddify / Karing</span><code id="subSingbox"></code><button type="button" id="btnCopySingbox">复制</button></div>
 <div class="sub-row"><span class="lbl">Clash / mihomo / Verge</span><code id="subClash"></code><button type="button" id="btnCopyClash">复制</button></div>
 <div class="sub-row"><span class="lbl">Surge</span><code id="subSurge"></code><button type="button" id="btnCopySurge">复制</button></div>
 <div class="sub-row"><span class="lbl">通用链接（hy2 / vless）</span><code id="subLinks"></code><button type="button" id="btnCopyLinks">复制</button></div>
-<p class="muted">三个地址是同一个订阅 token、按格式分流；/c/?token=…&amp;client=…（sublinkPro 风格）和 /sub/&lt;token&gt;?format=… 都可用；base64 版见控制台接口 /api/sub-link。</p>
 <p class="muted" id="shareInfo"></p>
 <div class="actions"><button type="button" id="btnImport">一键导入 sing-box</button> <button type="button" class="ghost" id="btnRefresh">刷新流量</button> <button type="button" class="ghost" id="btnRotate">刷新订阅链接（旧链接立即失效）</button> <button type="button" class="ghost" id="btnDisable">停用订阅链接</button> <button type="button" class="ghost" id="btnLogout">退出登录</button></div>
 <p class="muted" id="copyMsg"></p></div>
@@ -1781,7 +1778,6 @@ async function doAuth(body){
   document.getElementById("who").textContent=j.user_id+(j.username?" ("+j.username+")":"");
   document.getElementById("carrotOut").textContent=j.carrot;
   document.getElementById("statCarrot").textContent=j.carrot;
-  document.getElementById("demoBadge").textContent=j.demo?"（演示模式）":"";
   document.getElementById("subSingbox").textContent=subUrls.singbox;
   document.getElementById("subClash").textContent=subUrls.clash;
   document.getElementById("subSurge").textContent=subUrls.surge||subUrls.c_surge||"";
@@ -1809,9 +1805,6 @@ async function loadNodes(){
   document.getElementById("nodeRows").innerHTML=html||"<tr><td colspan=\\"5\\">暂无节点</td></tr>";
 }
 document.getElementById("btnToken").onclick=function(){var t=document.getElementById("token").value.trim();if(!t){showMsg("先粘贴 EMOS token");return}doAuth({token:t})};
-document.getElementById("btnDemo").onclick=function(){doAuth({carrot:Number(document.getElementById("demoCarrot").value)})};
-document.getElementById("btnDemo600").onclick=function(){document.getElementById("demoCarrot").value=600;doAuth({carrot:600})};
-document.getElementById("btnDemo400").onclick=function(){document.getElementById("demoCarrot").value=400;doAuth({carrot:400})};
 document.getElementById("btnCopySingbox").onclick=function(){if(subUrls)copyText(subUrls.singbox,"已复制 sing-box 订阅链接。")};
 document.getElementById("btnCopyClash").onclick=function(){if(subUrls)copyText(subUrls.clash,"已复制 Clash 订阅链接。")};
 document.getElementById("btnCopySurge").onclick=function(){if(subUrls)copyText(subUrls.surge||subUrls.c_surge||"","已复制 Surge 订阅链接。")};
@@ -1839,7 +1832,6 @@ async function tryResume(){
     document.getElementById("who").textContent=j.user_id;
     document.getElementById("carrotOut").textContent=j.carrot;
     document.getElementById("statCarrot").textContent=j.carrot;
-    document.getElementById("demoBadge").textContent=j.demo?"（演示模式）":"";
     document.getElementById("subSingbox").textContent=subUrls.singbox;
     document.getElementById("subClash").textContent=subUrls.clash;
     document.getElementById("subSurge").textContent=subUrls.surge||subUrls.c_surge||"";
@@ -1857,9 +1849,9 @@ const server = http.createServer(async (req, res) => {
     const u = new URL(req.url, 'http://localhost');
     if (req.method === 'GET' && u.pathname === '/') {
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-      return res.end(HTML);
+      return res.end(HTML.split('{{VERSION}}').join(VERSION));
     }
-    if (req.method === 'GET' && u.pathname === '/health') return sendJson(res, 200, { ok: true, nodes: NODES.length });
+    if (req.method === 'GET' && u.pathname === '/health') return sendJson(res, 200, { ok: true, version: VERSION, nodes: NODES.length });
     if (req.method === 'GET' && u.pathname === '/admin') return handleAdminPage(req, res);
     if (req.method === 'POST' && u.pathname === '/api/admin/login') return handleAdminLogin(req, res);
     if (req.method === 'POST' && u.pathname === '/api/admin/logout') return handleAdminLogout(req, res);
@@ -1890,7 +1882,7 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, () => {
-  console.log('emos-sub prototype listening on http://127.0.0.1:' + PORT);
+  console.log('emos-sub v' + VERSION + ' listening on http://127.0.0.1:' + PORT);
   console.log('nodes loaded: ' + NODES.map((n) => n.key + '->probe#' + n.probe_node_id).join(', '));
 });
 

@@ -81,6 +81,8 @@ cmd_status() {
     local v; v="$(cd "$INSTALL_DIR" && git rev-parse --short origin/main 2>/dev/null)"
     if [ -n "$v" ]; then say "版本：origin/main $v"
     else say "版本：$(cd "$INSTALL_DIR" && git log --oneline -1 2>/dev/null || echo "未用 git 安装")"; fi
+    local av; av="$(grep -o "VERSION = '[^']*'" "$INSTALL_DIR/server.js" 2>/dev/null | cut -d"'" -f2)"
+    [ -n "$av" ] && say "程序版本：v$av"
   fi
   local pid; pid="$(running_pid)"
   if has_systemd && [ -f "$UNIT" ]; then
