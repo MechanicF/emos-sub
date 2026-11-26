@@ -1,4 +1,4 @@
-// EMOS-gated sing-box gateway v1.4.4 — zero dependencies.
+// EMOS-gated sing-box gateway v1.4.5 — zero dependencies.
 // Node >= 18 (uses global fetch). Run: node server.js  (PORT env, default 3000)
 // Scope: EMOS login -> carrot > 500 -> console (nodes + per-user sub links)
 // + NODE TOTAL traffic only, from https://1e.lol/api/nodes. NO per-user traffic.
@@ -19,7 +19,7 @@ const path = require('path');
 const crypto = require('crypto');
 
 const PORT = parseInt(process.env.PORT || '3000', 10);
-const VERSION = '1.4.4';
+const VERSION = '1.4.5';
 const CONFIG_PATH = path.join(__dirname, 'config', 'nodes.json');
 const CLASH_TEMPLATE_PATH = path.join(__dirname, 'config', 'templates', 'clash.yaml');
 const SINGBOX_TEMPLATE_PATH = path.join(__dirname, 'config', 'templates', 'singbox.json');
@@ -1940,7 +1940,6 @@ code{word-break:break-all;background:rgba(0,0,0,.4);padding:2px 7px;border-radiu
 @media (max-width:640px){body{padding:18px 12px 36px}.card{padding:16px}.stat{min-width:calc(50% - 6px)}.sub-row{flex-wrap:wrap}.sub-row .lbl{width:100%}.sub-row code{white-space:normal}.topbar{flex-wrap:nowrap}.topbar h1{font-size:19px}.brand-mark{width:38px;height:38px;border-radius:11px}.topbar .pill{display:none}.topbar #btnTheme{margin-left:auto}.node-table{overflow:visible;margin:0;padding:0}.node-table thead{display:none}.node-table table,.node-table tbody,.node-table tr,.node-table td{display:block;width:100%}.node-table tr{border:1px solid var(--border);border-radius:14px;padding:4px 14px;margin:12px 0;background:var(--card-solid)}.node-table td{border-bottom:1px solid var(--border);padding:10px 0}.node-table td:last-child{border-bottom:0}.node-table td[data-label]:not([data-label=""])::before{content:attr(data-label);display:block;font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);margin-bottom:2px}}
 </style></head><body><div class="wrap">
 <div class="topbar"><div class="brand-mark"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 4 14h6l-1 8 9-12h-6l1-8z"/></svg></div><div><h1>EMOS 订阅控制台</h1><p class="subtitle">EMOS 登录 · 萝卜 &gt; 500 解锁订阅</p></div><span class="pill accent" style="margin-left:auto">{{VERSION}}</span><button type="button" class="ghost" id="btnTheme" style="margin:0 0 0 8px">白天模式</button></div>
-<p class="muted">萝卜 &gt; 500 才能进入控制台；节点流量为探针整机总流量。</p>
 
 <div class="card hero" id="loginCard"><h2>登录</h2>
 <p class="muted">用你的 EMOS 账号登录，核验萝卜后进入控制台</p>
