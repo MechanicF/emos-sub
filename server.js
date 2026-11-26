@@ -1090,7 +1090,7 @@ async function serveSubscription(req, res, token) {
   if (format === 'html') {
     const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;');
     const page = '<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>订阅 · EMOS-gated</title>'
-      + '<style>body{background:#0b0e14;color:#e6e6e6;font-family:system-ui,sans-serif;margin:0;padding:24px}.wrap{max-width:640px;margin:0 auto}.card{background:#151a23;border:1px solid #2a3342;border-radius:10px;padding:16px;margin:12px 0}a{color:#60a5fa}code{word-break:break-all;background:#0b0e14;padding:2px 6px;border-radius:6px}.muted{color:#9aa4b2;font-size:13px}</style></head><body><div class="wrap">'
+      + '<style>body{margin:0;padding:28px 20px 48px;min-height:100vh;color:#eef2f8;font-family:system-ui,-apple-system,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;font-size:15px;line-height:1.55;background:radial-gradient(900px 480px at 12% -10%,rgba(99,102,241,.28),transparent 60%),radial-gradient(760px 480px at 92% 0%,rgba(34,211,238,.15),transparent 55%),linear-gradient(180deg,#0b0f1a,#090d16)}.wrap{max-width:640px;margin:0 auto}.card{background:rgba(255,255,255,.045);border:1px solid rgba(255,255,255,.09);border-radius:16px;padding:18px 20px;margin:14px 0;box-shadow:0 12px 32px rgba(0,0,0,.38)}h1{font-size:21px;margin:0 0 6px}h2{font-size:13px;letter-spacing:.1em;text-transform:uppercase;color:#94a3b8;margin:0 0 8px}a{color:#93c5fd;text-decoration:none}a:hover{text-decoration:underline}code{word-break:break-all;background:rgba(0,0,0,.4);padding:2px 7px;border-radius:6px;font-size:13px}.muted{color:#94a3b8;font-size:13px}</style></head><body><div class="wrap">'
       + '<h1>订阅链接</h1><p class="muted">这是你的专属订阅地址（分享链接有效期见控制台，萝卜掉到 ≤ 500 即失效）。请在客户端里粘贴对应的链接，不要用浏览器直接下载——浏览器不知道该用什么客户端打开。</p>'
       + '<div class="card"><h2>sing-box / Hiddify / Karing</h2><p><a href="' + esc(urls.c_singbox) + '">' + esc(urls.c_singbox) + '</a></p><p><a href="' + esc(urls.import_url) + '">一键导入 sing-box</a></p></div>'
       + '<div class="card"><h2>Clash / mihomo</h2><p><a href="' + esc(urls.c_clash) + '">' + esc(urls.c_clash) + '</a></p></div>'
@@ -1130,28 +1130,37 @@ async function handleAdminLogin(req, res) {
   if (!ADMIN_TOKEN) return sendJson(res, 503, { ok: false, error: 'admin not configured: set ADMIN_TOKEN env and restart the server' });
   let body;
   try { body = await readBody(req); } catch (e) { return sendJson(res, 400, { ok: false, error: e.message }); }
-  const token = typeof body.token === 'string' ? body.token : '';
-  let ok = false;
-  if (token.length === ADMIN_TOKEN.length && token.length > 0) {
-    try { ok = crypto.timingSafeEqual(Buffer.from(token), Buffer.from(ADMIN_TOKEN)); } catch (e) { ok = false; }
-  }
+  // Trim: copy-paste from chat/notes often adds a trailing space or newline.
+  const token = typeof body.token === 'string' ? body.token.trim() : '';
+  // Compare by BUFFER byte length, not JS string length: for a multibyte
+  // token (e.g. Chinese) the two differ, and timingSafeEqual throws when
+  // the buffers are different lengths — so compare buffers, never strings.
+  const a = Buffer.from(token), b = Buffer.from(ADMIN_TOKEN);
+  const ok = a.length > 0 && a.length === b.length && crypto.timingSafeEqual(a, b);
   if (!ok) return sendJson(res, 401, { ok: false, error: 'wrong admin token' });
   const sid = randHex(16);
   adminSessions.set(sid, { createdAt: Date.now(), expiresAt: Date.now() + ADMIN_SESSION_TTL_MS });
   res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'Set-Cookie': 'admin_session=' + sid + '; HttpOnly; Path=/; Max-Age=86400; SameSite=Lax' });
-  return res.end(JSON.stringify({ ok: true }));
+  // Also return the session id in the body: if the browser does not store
+  // or send the HttpOnly cookie (partitioned cookies, privacy modes), the
+  // page falls back to sending it as an X-Admin-Token header instead.
+  return res.end(JSON.stringify({ ok: true, session: sid }));
 }
 function handleAdminLogout(req, res) {
   const c = parseCookies(req).admin_session;
   if (c) adminSessions.delete(c);
+  // Also drop a session presented via the X-Admin-Token header fallback.
+  const h = req.headers['x-admin-token'];
+  if (typeof h === 'string' && adminSessions.has(h)) adminSessions.delete(h);
   res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'Set-Cookie': 'admin_session=; HttpOnly; Path=/; Max-Age=0; SameSite=Lax' });
   return res.end(JSON.stringify({ ok: true }));
 }
 function handleAdminPage(req, res) {
-  if (!ADMIN_TOKEN) {
-    res.writeHead(503, { 'Content-Type': 'text/html; charset=utf-8' });
-    return res.end('<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><title>后台未配置</title></head><body style="font-family:system-ui;background:#0b0e14;color:#e6e6e6;padding:24px"><h1>后台未配置</h1><p>需要先设置环境变量 <code>ADMIN_TOKEN</code> 再启动服务，例如：<code>ADMIN_TOKEN=你的口令 node server.js</code>，然后重新打开 /admin。不要把口令写进任何文件或聊天记录。</p></body></html>');
-  }
+  // Always serve the admin page (200), even when ADMIN_TOKEN is unset:
+  // the page probes GET /api/admin/health on load and shows a clear
+  // "后台未配置" panel with the exact restart command when it gets a 503.
+  // Returning a bare 503 page here used to leave the user with no way to
+  // tell a misconfiguration from a broken login form.
   res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
   return res.end(ADMIN_HTML);
 }
@@ -1324,121 +1333,474 @@ async function handleAdminApi(req, res) {
 
 // --- admin page (single page, plain HTML/JS, no build step) ---------------
 const ADMIN_HTML = `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>后台管理 · EMOS 订阅网关</title><style>
-body{background:#0b0e14;color:#e6e6e6;font-family:system-ui,-apple-system,sans-serif;margin:0;padding:24px}.wrap{max-width:1000px;margin:0 auto}h1{font-size:20px}h2{font-size:16px;margin-top:28px}.card{background:#151a23;border:1px solid #2a3342;border-radius:10px;padding:16px;margin:12px 0}input,textarea{width:100%;box-sizing:border-box;background:#0b0e14;color:#e6e6e6;border:1px solid #2a3342;border-radius:8px;padding:10px;margin:6px 0}button{background:#3b82f6;color:#fff;border:0;border-radius:8px;padding:10px 16px;cursor:pointer;margin:4px 6px 4px 0}button.ghost{background:#26303f}button.danger{background:#b91c1c}button:disabled{opacity:.5}table{width:100%;border-collapse:collapse;font-size:14px}th,td{text-align:left;padding:8px;border-bottom:1px solid #2a3342;vertical-align:top}.muted{color:#9aa4b2;font-size:13px}.bad{color:#ef4444}.ok{color:#22c55e}code{word-break:break-all;background:#0b0e14;padding:2px 6px;border-radius:6px}.hidden{display:none}pre{background:#0b0e14;border:1px solid #2a3342;border-radius:8px;padding:12px;overflow:auto;font-size:13px}a{color:#60a5fa}.row{display:flex;gap:12px}.row>div{flex:1}
-</style></head><body><div class="wrap"><h1>后台管理 <span class="muted">· EMOS 订阅网关</span></h1>
-<p class="muted">只有站长能进：管理节点（订阅内容）、分享链接、设置。用户控制台在 <a href="/">/</a>，不受后台改动影响（节点改完订阅立即生效，不用重启）。</p>
-<div class="card" id="loginCard"><h2>登录</h2>
-<label class="muted">管理员口令（ADMIN_TOKEN）</label><input id="adminToken" type="password" placeholder="输入 ADMIN_TOKEN" autocomplete="off">
-<button id="btnAdminLogin">登录</button><p id="adminMsg" class="muted"></p></div>
+:root{--bg:#0a0e17;--card:rgba(255,255,255,.045);--card-solid:#121826;--border:rgba(255,255,255,.09);--text:#eef2f8;--muted:#94a3b8;--faint:#64748b;--accent:#6366f1;--accent2:#22d3ee;--grad:linear-gradient(135deg,#6366f1,#8b5cf6 48%,#22d3ee);--green:#34d399;--green-bg:rgba(52,211,153,.13);--red:#f87171;--red-bg:rgba(248,113,113,.13);--amber:#fbbf24;--amber-bg:rgba(251,191,36,.12);--radius:16px;--shadow:0 12px 32px rgba(0,0,0,.38)}
+*{box-sizing:border-box}
+body{margin:0;padding:28px 20px 48px;min-height:100vh;color:var(--text);font-family:system-ui,-apple-system,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;font-size:15px;line-height:1.55;background:radial-gradient(900px 480px at 12% -10%,rgba(99,102,241,.28),transparent 60%),radial-gradient(760px 480px at 92% 0%,rgba(34,211,238,.15),transparent 55%),linear-gradient(180deg,#0b0f1a,#090d16)}
+.wrap{max-width:1020px;margin:0 auto}
+.topbar{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-bottom:6px}
+.brand-mark{width:44px;height:44px;border-radius:13px;background:var(--grad);display:flex;align-items:center;justify-content:center;box-shadow:0 6px 18px rgba(99,102,241,.45);flex:none}
+.brand-mark svg{width:24px;height:24px}
+h1{font-size:21px;margin:0;letter-spacing:.02em}
+.subtitle{color:var(--muted);font-size:13px;margin:2px 0 0}
+.pill{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:600;letter-spacing:.04em;padding:4px 11px;border-radius:999px;border:1px solid var(--border);background:rgba(255,255,255,.05);color:var(--muted);white-space:nowrap}
+.pill.ok{color:var(--green);background:var(--green-bg);border-color:rgba(52,211,153,.35)}
+.pill.bad{color:var(--red);background:var(--red-bg);border-color:rgba(248,113,113,.35)}
+.pill.warn{color:var(--amber);background:var(--amber-bg);border-color:rgba(251,191,36,.35)}
+.pill.accent{color:#c7d2fe;background:rgba(99,102,241,.16);border-color:rgba(99,102,241,.4)}
+.card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:20px 22px;margin:16px 0;box-shadow:var(--shadow);backdrop-filter:blur(8px)}
+.card h2{font-size:12px;font-weight:700;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);margin:0 0 14px}
+.card h2 .count{color:var(--faint);letter-spacing:0;text-transform:none}
+.muted{color:var(--muted);font-size:13px}
+.bad{color:var(--red)} .ok{color:var(--green)} .warn{color:var(--amber)}
+a{color:#93c5fd;text-decoration:none} a:hover{text-decoration:underline}
+label{display:block;font-size:13px;color:var(--muted);margin:12px 0 4px}
+input,textarea{width:100%;background:rgba(0,0,0,.32);color:var(--text);border:1px solid var(--border);border-radius:10px;padding:11px 13px;font:inherit;font-size:14px;outline:none;transition:border-color .15s,box-shadow .15s}
+input:focus,textarea:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(99,102,241,.28)}
+input:disabled{opacity:.55}
+textarea{resize:vertical}
+button{font:inherit;font-size:14px;font-weight:600;color:#fff;background:var(--grad);border:0;border-radius:10px;padding:10px 18px;cursor:pointer;margin:6px 8px 6px 0;box-shadow:0 4px 14px rgba(99,102,241,.35);transition:transform .12s,box-shadow .12s,opacity .12s}
+button:hover{transform:translateY(-1px);box-shadow:0 7px 20px rgba(99,102,241,.45)}
+button:focus-visible{outline:2px solid var(--accent2);outline-offset:2px}
+button:disabled{opacity:.55;cursor:wait;transform:none}
+button.ghost{background:rgba(255,255,255,.07);color:var(--text);box-shadow:none;border:1px solid var(--border)}
+button.ghost:hover{background:rgba(255,255,255,.12);box-shadow:none}
+button.danger{background:linear-gradient(135deg,#dc2626,#b91c1c);box-shadow:0 4px 14px rgba(220,38,38,.3)}
+table{width:100%;border-collapse:collapse;font-size:14px}
+thead th{position:sticky;top:0;background:var(--card-solid);font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);border-bottom:1px solid var(--border)}
+th,td{text-align:left;padding:10px 12px;border-bottom:1px solid rgba(255,255,255,.06);vertical-align:top}
+tbody tr{transition:background .12s} tbody tr:hover{background:rgba(255,255,255,.03)}
+tbody tr:last-child td{border-bottom:0}
+td button{padding:6px 11px;font-size:13px;margin:2px 4px 2px 0;box-shadow:none}
+.table-scroll{overflow-x:auto;margin:0 -4px;padding:0 4px}
+code{word-break:break-all;background:rgba(0,0,0,.4);padding:2px 7px;border-radius:6px;font-size:13px}
+pre{background:rgba(0,0,0,.4);border:1px solid var(--border);border-radius:10px;padding:14px;overflow:auto;font-size:13px;line-height:1.5;margin:12px 0}
+.hidden{display:none!important}
+.row{display:flex;gap:14px;flex-wrap:wrap}.row>div{flex:1;min-width:200px}
+.stats{display:flex;gap:10px;flex-wrap:wrap;margin:14px 0 4px}
+.stat{flex:1;min-width:130px;background:var(--card);border:1px solid var(--border);border-radius:14px;padding:14px 16px}
+.stat .k{font-size:12px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted)}
+.stat .v{font-size:22px;font-weight:700;margin-top:3px}
+.stat .s{font-size:12px;color:var(--faint);margin-top:2px}
+.login-wrap{max-width:440px;margin:48px auto 0}
+.login-card{text-align:center;padding:32px 28px}
+.lock{width:60px;height:60px;margin:0 auto 16px;border-radius:18px;background:var(--grad);display:flex;align-items:center;justify-content:center;box-shadow:0 8px 22px rgba(99,102,241,.45)}
+.lock svg{width:30px;height:30px}
+.login-card h2{font-size:18px;letter-spacing:0;text-transform:none;color:var(--text);margin:0 0 6px}
+.login-card .muted{margin:0 0 8px}
+.login-card input{text-align:center}
+.login-card button{width:100%;margin:12px 0 4px;padding:12px}
+#adminMsg{min-height:20px;margin:10px 0 0;font-size:13px}
+#adminMsg.err{color:var(--red)}
+.warn-card{border-color:rgba(251,191,36,.45);background:linear-gradient(180deg,rgba(251,191,36,.09),rgba(251,191,36,.02))}
+.warn-card h2{color:var(--amber)}
+.cmd{display:flex;align-items:center;gap:10px;background:rgba(0,0,0,.45);border:1px solid var(--border);border-radius:10px;padding:12px 14px;margin:12px 0;font-size:14px;overflow-x:auto}
+.cmd code{background:none;padding:0;white-space:nowrap}
+.cmd button{margin:0 0 0 auto;flex:none}
+.form-grid{display:grid;grid-template-columns:1fr 1fr;gap:4px 16px}
+.msg{font-size:13px;color:var(--muted);margin:8px 0 0;min-height:18px}
+.msg.err{color:var(--red)} .msg.ok{color:var(--green)}
+.section-head{display:flex;align-items:baseline;justify-content:space-between;gap:10px;flex-wrap:wrap}
+@media (max-width:640px){body{padding:18px 12px 36px}.card{padding:16px}.form-grid{grid-template-columns:1fr}.stat{min-width:calc(50% - 6px)}}
+</style></head><body><div class="wrap">
+<div class="topbar"><div class="brand-mark"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 3 7v6c0 5 4 8 9 9 5-1 9-4 9-9V7l-9-5z"/><path d="M9 12l2 2 4-4"/></svg></div><div><h1>后台管理</h1><p class="subtitle">EMOS 订阅网关 · 只有站长能进</p></div><span class="pill accent" style="margin-left:auto">站长后台</span></div>
+<p class="muted">管理节点（订阅内容）、分享链接、设置。用户控制台在 <a href="/">/</a>，节点改完订阅立即生效，不用重启。</p>
+
+<div class="card warn-card hidden" id="unconfiguredCard"><h2>后台未配置</h2>
+<p style="margin:0 0 6px">服务器启动时没有设置 <code>ADMIN_TOKEN</code>，所以后台登录永远不可能成功 —— 不是口令错了，是根本没配口令。</p>
+<p class="muted" style="margin:0 0 4px">停掉当前服务，用下面这条命令重新启动（把“你的口令”换成你自己的口令），然后重新打开 /admin：</p>
+<div class="cmd"><code>ADMIN_TOKEN=你的口令 node server.js</code><button type="button" class="ghost" id="btnCopyCmd">复制</button></div>
+<p class="muted" style="margin:0">也可以用控制脚本：<code>./manage.sh install --admin-token 你的口令</code>。口令不要写进任何文件或聊天记录。</p>
+<p><button type="button" id="btnRecheck">重新检查</button></p></div>
+
+<div class="login-wrap hidden" id="loginWrap"><div class="card login-card" id="loginCard">
+<div class="lock"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg></div>
+<h2>站长登录</h2><p class="muted">输入启动服务时设置的管理员口令（ADMIN_TOKEN）</p>
+<label for="adminToken" style="text-align:left">管理员口令</label>
+<input id="adminToken" type="password" placeholder="输入 ADMIN_TOKEN" autocomplete="off">
+<button type="button" id="btnAdminLogin">登录</button>
+<p id="adminMsg" class="muted"></p></div></div>
+
 <div class="hidden" id="adminApp">
-<p><span id="healthLine" class="muted"></span> <button class="ghost" id="btnLogout">退出登录</button></p>
-<div class="card"><h2>节点</h2>
-<p class="muted" id="probeNote"></p>
-<table><thead><tr><th>Key</th><th>名称</th><th>协议</th><th>服务器</th><th>探针</th><th>操作</th></tr></thead><tbody id="nodeRows"></tbody></table>
-<h2 id="formTitle">添加节点</h2>
-<label class="muted">节点链接（hy2:// / hysteria2:// / vless://，粘贴后先点“解析预览”，确认无误再保存）</label>
+<div class="stats" id="healthChips"></div>
+<p><span id="healthLine" class="muted"></span> <button type="button" class="ghost" id="btnLogout">退出登录</button></p>
+
+<div class="card"><div class="section-head"><h2>节点 <span class="count" id="nodeCount"></span></h2><span class="pill" id="probeNote"></span></div>
+<div class="table-scroll"><table><thead><tr><th>Key</th><th>名称</th><th>协议</th><th>服务器</th><th>探针</th><th>操作</th></tr></thead><tbody id="nodeRows"></tbody></table></div>
+<h2 id="formTitle" style="margin-top:24px">添加节点</h2>
+<label>节点链接（hy2:// / hysteria2:// / vless://，粘贴后先点“解析预览”，确认无误再保存）</label>
 <textarea id="nodeLink" rows="3" placeholder="hysteria2://密码@域名:端口?sni=域名&obfs=salamander&obfs-password=xxx#名字"></textarea>
-<div class="row"><div><label class="muted">显示名（可空，默认用链接里的名字）</label><input id="nodeName" placeholder="例如 PSM-sb-hy2-opju"></div>
-<div><label class="muted">地区代码（可空，如 HK / JP / US）</label><input id="nodeRegion" placeholder="JP"></div></div>
-<div class="row"><div><label class="muted">探针 id（可空，不在探针里就留空）</label><input id="nodeProbe" type="number" placeholder="20"></div>
-<div><label class="muted">Key（可空，自动生成，唯一）</label><input id="nodeKey" placeholder="hy2-jp-xxx"></div></div>
-<button id="btnParse">解析预览</button> <button id="btnSaveNode">保存节点</button> <button class="ghost hidden" id="btnCancelEdit">取消编辑</button>
-<pre id="nodePreview" class="hidden"></pre><p id="nodeMsg" class="muted"></p></div>
+<div class="row"><div><label>显示名（可空，默认用链接里的名字）</label><input id="nodeName" placeholder="例如 PSM-sb-hy2-opju"></div>
+<div><label>地区代码（可空，如 HK / JP / US）</label><input id="nodeRegion" placeholder="JP"></div></div>
+<div class="row"><div><label>探针 id（可空，不在探针里就留空）</label><input id="nodeProbe" type="number" placeholder="20"></div>
+<div><label>Key（可空，自动生成，唯一）</label><input id="nodeKey" placeholder="hy2-jp-xxx"></div></div>
+<button type="button" id="btnParse">解析预览</button> <button type="button" id="btnSaveNode">保存节点</button> <button type="button" class="ghost hidden" id="btnCancelEdit">取消编辑</button>
+<pre id="nodePreview" class="hidden"></pre><p id="nodeMsg" class="msg"></p></div>
+
 <div class="card"><h2>分享链接（订阅）</h2>
-<p class="muted">分享由用户 EMOS 登录后自动创建（每人一条，绑定 user_id），后台不能凭空给某人发一条。token 只显示前 6 位；刷新会让旧链接立即失效，停用后用户重新登录才能恢复。</p>
-<table><thead><tr><th>Token</th><th>用户</th><th>创建 / 到期</th><th>状态</th><th>访问</th><th>最后 IP / 访问</th><th>操作</th></tr></thead><tbody id="shareRows"></tbody></table>
-<button class="danger" id="btnRevokeAll">全部吊销（所有订阅立即失效）</button> <span id="shareMsg" class="muted"></span></div>
+<p class="muted" style="margin-top:0">分享由用户 EMOS 登录后自动创建（每人一条，绑定 user_id），后台不能凭空给某人发一条。token 只显示前 6 位；刷新会让旧链接立即失效，停用后用户重新登录才能恢复。</p>
+<div class="table-scroll"><table><thead><tr><th>Token</th><th>用户</th><th>创建 / 到期</th><th>状态</th><th>访问</th><th>最后 IP / 访问</th><th>操作</th></tr></thead><tbody id="shareRows"></tbody></table></div>
+<p><button type="button" class="danger" id="btnRevokeAll">全部吊销（所有订阅立即失效）</button></p><p id="shareMsg" class="msg"></p></div>
+
 <div class="card"><h2>设置</h2>
-<div class="row"><div><label class="muted">萝卜门槛（carrot 必须 &gt; 此值，默认 500）</label><input id="setThreshold" type="number"></div>
-<div><label class="muted">分享有效期（小时，0 = 永不过期，默认 24）</label><input id="setTtl" type="number" step="any"></div></div>
-<div class="row"><div><label class="muted">探针缓存（秒，默认 30）</label><input id="setProbeCache" type="number"></div>
-<div><label class="muted">节点命名规则</label><input id="setNameRule"></div></div>
+<div class="form-grid">
+<div><label>萝卜门槛（carrot 必须 &gt; 此值，默认 500）</label><input id="setThreshold" type="number"></div>
+<div><label>分享有效期（小时，0 = 永不过期，默认 24）</label><input id="setTtl" type="number" step="any"></div>
+<div><label>探针缓存（秒，默认 30）</label><input id="setProbeCache" type="number"></div>
+<div><label>节点命名规则</label><input id="setNameRule"></div>
+</div>
 <p class="muted" id="setSources"></p>
-<button id="btnSaveSettings">保存设置</button> <span id="setMsg" class="muted"></span></div>
+<button type="button" id="btnSaveSettings">保存设置</button> <p id="setMsg" class="msg"></p></div>
 </div></div>
 <script>
-var nodes=[],editingKey=null;
+var nodes=[],editingKey=null,adminSession=null;
 function esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;')}
 function fmtTime(t){return t?new Date(t).toLocaleString():'—'}
-async function api(method,path,body){var o={method:method,credentials:'include',headers:{'Content-Type':'application/json'}};if(body!==undefined)o.body=JSON.stringify(body);var r=await fetch(path,o);var j=null;try{j=await r.json()}catch(e){}return{status:r.status,json:j||{}}}
-function showLogin(msg){document.getElementById('loginCard').classList.remove('hidden');document.getElementById('adminApp').classList.add('hidden');if(msg)document.getElementById('adminMsg').textContent=msg}
-function showApp(){document.getElementById('loginCard').classList.add('hidden');document.getElementById('adminApp').classList.remove('hidden')}
-async function loadHealth(){var r=await api('GET','/api/admin/health');if(r.status!==200)return;var j=r.json;document.getElementById('healthLine').textContent='节点 '+j.nodes+' 条 · 分享 '+j.shares+' 条 · 登录会话 '+j.sessions+' 个 · 探针：'+j.probe_source+'（'+j.probe_nodes+' 台）· 门槛 > '+j.carrot_threshold}
-async function loadNodes(){var r=await api('GET','/api/admin/nodes');if(r.status===401){showLogin('登录已过期，请重新登录。');return false}if(r.status===503){showLogin('后台未配置：服务器没有设置 ADMIN_TOKEN。');return false}if(!r.json.ok){document.getElementById('nodeMsg').textContent='拉取失败：'+(r.json.error||'');return false}nodes=r.json.nodes;document.getElementById('probeNote').textContent='探针来源：'+r.json.probe_source+'（只做节点总流量）';var h='';nodes.forEach(function(n,i){h+='<tr><td><code>'+esc(n.key)+'</code></td><td><b>'+esc(n.name)+'</b><br><span class="muted">'+esc(n.region)+'</span></td><td>'+esc(n.protocol||'—')+'</td><td>'+esc(n.server||'—')+':'+(n.server_port==null?'—':n.server_port)+'<br><span class="muted">sni: '+esc(n.sni||'—')+'</span></td><td>'+(n.probe_node_id==null?'—':('#'+n.probe_node_id+' '+(n.online===true?'<span class="ok">在线</span>':n.online===false?'<span class="bad">离线</span>':'<span class="muted">不在探针里</span>')))+'</td><td><button onclick="editNode('+i+')">编辑</button> <button class="ghost" onclick="moveNode('+i+',-1)">↑</button><button class="ghost" onclick="moveNode('+i+',1)">↓</button> <button class="danger" onclick="delNode(\''+esc(n.key)+'\')">删除</button></td></tr>'});document.getElementById('nodeRows').innerHTML=h||'<tr><td colspan="6">暂无节点</td></tr>';return true}
-async function loadShares(){var r=await api('GET','/api/admin/shares');if(r.status!==200)return;var h='';r.json.shares.forEach(function(s){h+='<tr><td><code>'+esc(s.token_masked)+'</code></td><td><code>'+esc(s.user_id)+'</code></td><td>'+fmtTime(s.created_at)+'<br><span class="muted">到期：'+fmtTime(s.expires_at)+'</span></td><td>'+(s.enabled?'<span class="ok">启用</span>':'<span class="bad">停用</span>')+'</td><td>'+s.access_count+' 次</td><td>'+esc(s.last_ip||'—')+'<br><span class="muted">'+fmtTime(s.last_access_at)+'</span></td><td><button onclick="shareAct(\''+s.id+'\',\'refresh\')">刷新</button> '+(s.enabled?'<button class="ghost" onclick="shareAct(\''+s.id+'\',\'disable\')">停用</button>':'<button class="ghost" onclick="shareAct(\''+s.id+'\',\'enable\')">启用</button>')+' <button class="danger" onclick="shareDel(\''+s.id+'\')">吊销</button></td></tr>'});document.getElementById('shareRows').innerHTML=h||'<tr><td colspan="7">暂无分享（还没有用户登录过）</td></tr>'}
-async function loadSettings(){var r=await api('GET','/api/admin/settings');if(r.status!==200)return;var s=r.json.settings;document.getElementById('setThreshold').value=s.carrot_threshold;document.getElementById('setTtl').value=s.share_ttl_hours;document.getElementById('setNameRule').value=s.name_rule;document.getElementById('setProbeCache').value=s.probe_cache_seconds;var src=r.json.sources;document.getElementById('setSources').textContent='来源：门槛='+src.carrot_threshold+'，有效期='+src.share_ttl_hours+'，命名='+src.name_rule+'，探针缓存='+src.probe_cache_seconds+'。优先级：启动时环境变量 > settings.json > 默认值。'}
-async function loadAll(){var ok=await loadNodes();if(!ok)return;showApp();await loadShares();await loadSettings();await loadHealth()}
+async function api(method,path,body){
+  var o={method:method,credentials:'include',headers:{'Content-Type':'application/json'}};
+  if(adminSession)o.headers['X-Admin-Token']=adminSession;
+  if(body!==undefined)o.body=JSON.stringify(body);
+  try{
+    var r=await fetch(path,o);var j=null;try{j=await r.json()}catch(e){}
+    return{status:r.status,json:j||{}};
+  }catch(e){
+    // fetch 本身抛错（断网、服务重启、跨域被挡）以前会静默失败，页面看起来
+    // 像“点了没反应”。现在把它当成一次带错误信息的返回，让调用方显示出来。
+    return{status:0,json:{ok:false,error:'网络错误：'+e.message}};
+  }
+}
+function showLogin(msg){
+  document.getElementById('loginWrap').classList.remove('hidden');
+  document.getElementById('adminApp').classList.add('hidden');
+  document.getElementById('unconfiguredCard').classList.add('hidden');
+  var m=document.getElementById('adminMsg');
+  m.textContent=msg||'';
+  m.classList.toggle('err',!!msg);
+}
+function showUnconfigured(){
+  document.getElementById('loginWrap').classList.add('hidden');
+  document.getElementById('adminApp').classList.add('hidden');
+  document.getElementById('unconfiguredCard').classList.remove('hidden');
+}
+function showApp(){
+  document.getElementById('loginWrap').classList.add('hidden');
+  document.getElementById('unconfiguredCard').classList.add('hidden');
+  document.getElementById('adminApp').classList.remove('hidden');
+}
+function statChip(k,v,s){return '<div class="stat"><div class="k">'+esc(k)+'</div><div class="v">'+esc(v)+'</div>'+(s?'<div class="s">'+esc(s)+'</div>':'')+'</div>'}
+async function loadHealth(){
+  var r=await api('GET','/api/admin/health');
+  if(r.status!==200)return;
+  var j=r.json;
+  document.getElementById('healthChips').innerHTML=
+    statChip('节点',j.nodes+' 条','订阅内容')+
+    statChip('分享',j.shares+' 条','每人一条')+
+    statChip('登录会话',j.sessions+' 个','用户在线')+
+    statChip('探针',j.probe_source,j.probe_nodes+' 台');
+  document.getElementById('healthLine').textContent='萝卜门槛 > '+j.carrot_threshold+' · 已运行 '+Math.floor(j.uptime_seconds/60)+' 分钟';
+}
+async function loadNodes(){
+  var r=await api('GET','/api/admin/nodes');
+  if(r.status===401){adminSession=null;showLogin('登录已过期，请重新登录。');return false}
+  if(r.status===503){showUnconfigured();return false}
+  if(r.status===0){document.getElementById('nodeMsg').textContent=r.json.error||'网络错误。';document.getElementById('nodeMsg').classList.add('err');return false}
+  if(!r.json.ok){document.getElementById('nodeMsg').textContent='拉取失败：'+(r.json.error||'');return false}
+  nodes=r.json.nodes;
+  document.getElementById('probeNote').textContent='探针：'+r.json.probe_source;
+  document.getElementById('nodeCount').textContent='共 '+nodes.length+' 条';
+  var h='';
+  nodes.forEach(function(n,i){
+    var probe=n.probe_node_id==null?'—':'#'+n.probe_node_id+' '+(n.online===true?'<span class="pill ok">在线</span>':n.online===false?'<span class="pill bad">离线</span>':'<span class="pill">不在探针里</span>');
+    h+='<tr><td><code>'+esc(n.key)+'</code></td><td><b>'+esc(n.name)+'</b><br><span class="muted">'+esc(n.region)+'</span></td><td><span class="pill">'+esc(n.protocol||'—')+'</span></td><td>'+esc(n.server||'—')+':'+(n.server_port==null?'—':n.server_port)+'<br><span class="muted">sni: '+esc(n.sni||'—')+'</span></td><td>'+probe+'</td><td><button type="button" onclick="editNode('+i+')">编辑</button> <button type="button" class="ghost" onclick="moveNode('+i+',-1)">↑</button><button type="button" class="ghost" onclick="moveNode('+i+',1)">↓</button> <button type="button" class="danger" onclick="delNode(\''+esc(n.key)+'\')">删除</button></td></tr>';
+  });
+  document.getElementById('nodeRows').innerHTML=h||'<tr><td colspan="6">暂无节点</td></tr>';
+  return true;
+}
+async function loadShares(){
+  var r=await api('GET','/api/admin/shares');
+  if(r.status!==200)return;
+  var h='';
+  r.json.shares.forEach(function(s){
+    h+='<tr><td><code>'+esc(s.token_masked)+'</code></td><td><code>'+esc(s.user_id)+'</code></td><td>'+fmtTime(s.created_at)+'<br><span class="muted">到期：'+fmtTime(s.expires_at)+'</span></td><td>'+(s.enabled?'<span class="pill ok">启用</span>':'<span class="pill bad">停用</span>')+'</td><td>'+s.access_count+' 次</td><td>'+esc(s.last_ip||'—')+'<br><span class="muted">'+fmtTime(s.last_access_at)+'</span></td><td><button type="button" onclick="shareAct(\''+s.id+'\',\'refresh\')">刷新</button> '+(s.enabled?'<button type="button" class="ghost" onclick="shareAct(\''+s.id+'\',\'disable\')">停用</button>':'<button type="button" class="ghost" onclick="shareAct(\''+s.id+'\',\'enable\')">启用</button>')+' <button type="button" class="danger" onclick="shareDel(\''+s.id+'\')">吊销</button></td></tr>';
+  });
+  document.getElementById('shareRows').innerHTML=h||'<tr><td colspan="7">暂无分享（还没有用户登录过）</td></tr>';
+}
+async function loadSettings(){
+  var r=await api('GET','/api/admin/settings');
+  if(r.status!==200)return;
+  var s=r.json.settings;
+  document.getElementById('setThreshold').value=s.carrot_threshold;
+  document.getElementById('setTtl').value=s.share_ttl_hours;
+  document.getElementById('setNameRule').value=s.name_rule;
+  document.getElementById('setProbeCache').value=s.probe_cache_seconds;
+  var src=r.json.sources;
+  document.getElementById('setSources').textContent='来源：门槛='+src.carrot_threshold+'，有效期='+src.share_ttl_hours+'，命名='+src.name_rule+'，探针缓存='+src.probe_cache_seconds+'。优先级：启动时环境变量 > settings.json > 默认值。';
+}
+async function loadAll(){
+  var ok=await loadNodes();
+  if(!ok)return;
+  showApp();
+  await loadShares();await loadSettings();await loadHealth();
+}
+// 先探一次后台健康状态再决定显示什么：已登录直接进后台；未配置显示
+// “后台未配置”大面板；未登录才显示登录框。不要让用户对着一个永远登
+// 不上去的登录框发呆。
+async function initAdmin(){
+  var r=await api('GET','/api/admin/health');
+  if(r.status===200){await loadAll();return;}
+  if(r.status===503){showUnconfigured();return;}
+  if(r.status===0){showLogin(r.json.error||'无法连接服务器。');return;}
+  showLogin('');
+}
 window.editNode=function(i){var n=nodes[i];if(!n)return;editingKey=n.key;document.getElementById('formTitle').textContent='编辑节点：'+n.key;document.getElementById('nodeLink').value=n.link||'';document.getElementById('nodeName').value=n.name;document.getElementById('nodeRegion').value=n.region||'';document.getElementById('nodeProbe').value=n.probe_node_id==null?'':n.probe_node_id;document.getElementById('nodeKey').value=n.key;document.getElementById('nodeKey').disabled=true;document.getElementById('btnCancelEdit').classList.remove('hidden');document.getElementById('nodeMsg').textContent='正在编辑 '+n.key+'：改链接会重新解析；不改链接只改名字/地区/探针 id。';window.scrollTo(0,document.getElementById('formTitle').offsetTop)};
 window.delNode=async function(key){if(!confirm('确定删除节点 '+key+'？订阅里会立刻去掉它。'))return;var r=await api('DELETE','/api/admin/nodes/'+encodeURIComponent(key));if(!r.json.ok){document.getElementById('nodeMsg').textContent='删除失败：'+(r.json.error||'');return}document.getElementById('nodeMsg').textContent='已删除 '+key+'。';await loadNodes();await loadHealth()};
 window.moveNode=async function(i,dir){var j=i+dir;if(j<0||j>=nodes.length)return;var keys=nodes.map(function(n){return n.key});var t=keys[i];keys[i]=keys[j];keys[j]=t;var r=await api('POST','/api/admin/nodes/reorder',{keys:keys});if(!r.json.ok){document.getElementById('nodeMsg').textContent='排序失败：'+(r.json.error||'');return}await loadNodes()};
 window.shareAct=async function(id,action){var r=await api('POST','/api/admin/shares/'+encodeURIComponent(id)+'/'+action);if(!r.json.ok){document.getElementById('shareMsg').textContent='操作失败：'+(r.json.error||'');return}document.getElementById('shareMsg').textContent=action==='refresh'?'已刷新，旧链接立即失效。':(action==='disable'?'已停用。':'已启用。');await loadShares()};
 window.shareDel=async function(id){if(!confirm('确定吊销这条分享？对应用户的订阅链接立即失效。'))return;var r=await api('DELETE','/api/admin/shares/'+encodeURIComponent(id));if(!r.json.ok){document.getElementById('shareMsg').textContent='吊销失败：'+(r.json.error||'');return}document.getElementById('shareMsg').textContent='已吊销。';await loadShares()};
-document.getElementById('btnAdminLogin').onclick=async function(){var t=document.getElementById('adminToken').value;if(!t){document.getElementById('adminMsg').textContent='先输入口令。';return}var r=await api('POST','/api/admin/login',{token:t});if(r.status===503){document.getElementById('adminMsg').textContent='后台未配置：服务器没有设置 ADMIN_TOKEN。';return}if(!r.json.ok){document.getElementById('adminMsg').textContent='登录失败：'+(r.json.error||'');return}document.getElementById('adminToken').value='';await loadAll()};
-document.getElementById('btnLogout').onclick=async function(){await api('POST','/api/admin/logout');showLogin('已退出。')};
+document.getElementById('btnAdminLogin').onclick=async function(){
+  var btn=document.getElementById('btnAdminLogin');
+  var msg=document.getElementById('adminMsg');
+  var t=document.getElementById('adminToken').value.trim();
+  if(!t){msg.textContent='先输入口令。';msg.classList.add('err');return;}
+  btn.disabled=true;btn.textContent='登录中…';
+  try{
+    var r=await api('POST','/api/admin/login',{token:t});
+    if(r.status===503){msg.textContent='后台未配置：服务器没有设置 ADMIN_TOKEN。';msg.classList.add('err');return;}
+    if(r.status===0){msg.textContent=r.json.error||'网络错误。';msg.classList.add('err');return;}
+    if(!r.json.ok){msg.textContent='登录失败：'+(r.json.error||'');msg.classList.add('err');return;}
+    // Cookie 是主路径；同时把会话 id 留在内存里，后续请求都带
+    // X-Admin-Token 头——浏览器不存/不发 cookie 时也能继续用。
+    if(r.json.session)adminSession=r.json.session;
+    document.getElementById('adminToken').value='';
+    msg.textContent='';msg.classList.remove('err');
+    await loadAll();
+  }catch(e){
+    msg.textContent='登录失败：'+e.message;msg.classList.add('err');
+  }finally{
+    btn.disabled=false;btn.textContent='登录';
+  }
+};
+document.getElementById('adminToken').addEventListener('keydown',function(e){
+  if(e.key==='Enter'){e.preventDefault();document.getElementById('btnAdminLogin').click();}
+});
+document.getElementById('btnLogout').onclick=async function(){
+  try{await api('POST','/api/admin/logout');}catch(e){}
+  adminSession=null;showLogin('已退出。');
+};
+document.getElementById('btnRecheck').onclick=function(){initAdmin();};
+document.getElementById('btnCopyCmd').onclick=function(){
+  var cmd='ADMIN_TOKEN=你的口令 node server.js';
+  if(navigator.clipboard){navigator.clipboard.writeText(cmd).then(function(){document.getElementById('btnCopyCmd').textContent='已复制';});}
+};
 document.getElementById('btnParse').onclick=async function(){var link=document.getElementById('nodeLink').value.trim();if(!link){document.getElementById('nodeMsg').textContent='先粘贴节点链接。';return}var r=await api('POST','/api/admin/nodes/parse',{link:link});var pre=document.getElementById('nodePreview');pre.classList.remove('hidden');if(!r.json.ok){pre.textContent='解析失败：'+(r.json.error||'');return}pre.textContent='协议：'+r.json.protocol+'\n'+JSON.stringify(r.json.parsed,null,2);document.getElementById('nodeMsg').textContent='解析成功，确认无误后点“保存节点”。'};
 document.getElementById('btnSaveNode').onclick=async function(){var link=document.getElementById('nodeLink').value.trim();var name=document.getElementById('nodeName').value.trim();var region=document.getElementById('nodeRegion').value.trim();var probe=document.getElementById('nodeProbe').value;var key=document.getElementById('nodeKey').value.trim();if(!link){document.getElementById('nodeMsg').textContent='链接不能为空。';return}var body={link:link,name:name,region:region,probe_node_id:probe===''?null:Number(probe)};var r;if(editingKey){r=await api('PUT','/api/admin/nodes/'+encodeURIComponent(editingKey),body)}else{if(key)body.key=key;r=await api('POST','/api/admin/nodes',body)}if(!r.json.ok){document.getElementById('nodeMsg').textContent='保存失败：'+(r.json.error||'');return}document.getElementById('nodeMsg').textContent='已保存：'+(r.json.node&&r.json.node.key);editingKey=null;document.getElementById('formTitle').textContent='添加节点';document.getElementById('nodeLink').value='';document.getElementById('nodeName').value='';document.getElementById('nodeRegion').value='';document.getElementById('nodeProbe').value='';document.getElementById('nodeKey').value='';document.getElementById('nodeKey').disabled=false;document.getElementById('btnCancelEdit').classList.add('hidden');document.getElementById('nodePreview').classList.add('hidden');await loadNodes();await loadHealth()};
 document.getElementById('btnCancelEdit').onclick=function(){editingKey=null;document.getElementById('formTitle').textContent='添加节点';document.getElementById('nodeLink').value='';document.getElementById('nodeName').value='';document.getElementById('nodeRegion').value='';document.getElementById('nodeProbe').value='';document.getElementById('nodeKey').value='';document.getElementById('nodeKey').disabled=false;document.getElementById('btnCancelEdit').classList.add('hidden');document.getElementById('nodeMsg').textContent=''};
 document.getElementById('btnRevokeAll').onclick=async function(){if(!confirm('确定吊销全部订阅链接？所有用户的订阅立即失效，他们需要重新登录。'))return;var r=await api('POST','/api/admin/shares/revoke-all');if(!r.json.ok){document.getElementById('shareMsg').textContent='操作失败：'+(r.json.error||'');return}document.getElementById('shareMsg').textContent='已吊销 '+r.json.revoked+' 条分享。';await loadShares()};
 document.getElementById('btnSaveSettings').onclick=async function(){var body={carrot_threshold:Number(document.getElementById('setThreshold').value),share_ttl_hours:Number(document.getElementById('setTtl').value),name_rule:document.getElementById('setNameRule').value,probe_cache_seconds:Number(document.getElementById('setProbeCache').value)};var r=await api('PUT','/api/admin/settings',body);if(!r.json.ok){document.getElementById('setMsg').textContent='保存失败：'+(r.json.error||'');return}var w=(r.json.warnings||[]).join(' ');document.getElementById('setMsg').textContent='已保存，立即生效。'+(w?' 注意：'+w:'');await loadSettings()};
-loadAll();
+initAdmin();
 </script></body></html>`;
 
 // --- console HTML (single page, no dependencies) -------------------------
-const HTML = '<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>EMOS 订阅控制台 · 原型</title><style>'
-  + 'body{background:#0b0e14;color:#e6e6e6;font-family:system-ui,-apple-system,sans-serif;margin:0;padding:24px} .wrap{max-width:900px;margin:0 auto} h1{font-size:20px} h2{font-size:16px;margin-top:28px} .card{background:#151a23;border:1px solid #2a3342;border-radius:10px;padding:16px;margin:12px 0} input{width:100%;box-sizing:border-box;background:#0b0e14;color:#e6e6e6;border:1px solid #2a3342;border-radius:8px;padding:10px;margin:6px 0} button{background:#3b82f6;color:#fff;border:0;border-radius:8px;padding:10px 16px;cursor:pointer;margin:4px 6px 4px 0} button.ghost{background:#26303f} button:disabled{opacity:.5} table{width:100%;border-collapse:collapse;font-size:14px} th,td{text-align:left;padding:8px;border-bottom:1px solid #2a3342;vertical-align:top} .bar{height:8px;background:#26303f;border-radius:4px;overflow:hidden;margin-top:4px} .bar i{display:block;height:100%;background:#3b82f6} .dot{display:inline-block;width:9px;height:9px;border-radius:50%;background:#22c55e} .dot.off{background:#ef4444} .muted{color:#9aa4b2;font-size:13px} .warn{color:#fbbf24} .ok{color:#22c55e} .bad{color:#ef4444} code{word-break:break-all;background:#0b0e14;padding:2px 6px;border-radius:6px} .hidden{display:none} a{color:#60a5fa}'
-  + '</style></head><body><div class="wrap"><h1>EMOS 订阅控制台 <span class="muted">· 原型</span></h1>'
-  + '<p class="muted">EMOS 登录 → 萝卜 &gt; 500 才能进控制台。节点流量是探针里的整台服务器流量（不是单条节点、不是每人用量）。</p>'
-  + '<div class="card" id="loginCard"><h2>登录</h2>'
-  + '<p><a href="/auth/emos"><button style="font-size:16px;padding:12px 20px">用 EMOS 账号登录</button></a></p>'
-  + '<p class="muted">点上面会跳到 EMOS（emos.best）登录，登录完自动跳回来，全程不用复制 token。第一次用建议走这里。</p>'
-  + '<hr style="border-color:#2a3342">'
-  + '<p class="muted">备用：手动粘贴 token / 演示（本地测试、或 /link 跳转出问题时用）</p>'
-  + '<label class="muted">EMOS Bearer Token（真实模式）</label><input id="token" type="password" placeholder="粘贴 EMOS token（只发给本服务器，不会保存到聊天记录）" autocomplete="off">'
-  + '<button id="btnToken">用 EMOS Token 登录</button>'
-  + '<p class="muted">或演示模式：直接填萝卜数，不调 EMOS。</p>'
-  + '<label class="muted">演示萝卜数</label><input id="demoCarrot" type="number" value="600">'
-  + '<button id="btnDemo">演示登录</button> <button class="ghost" id="btnDemo600">演示：600（达标）</button> <button class="ghost" id="btnDemo400">演示：400（不达标）</button>'
-  + '<p id="loginMsg" class="muted"></p></div>'
-  + '<div class="card hidden" id="gatedCard"><h2>未达标</h2><p id="gatedMsg"></p><p class="muted">萝卜 &gt; 500 才能看到节点和订阅链接。去 EMOS 签到 / 赚萝卜后再来。</p></div>'
-  + '<div class="hidden" id="dash"><div class="card"><h2>已达标 <span id="demoBadge"></span></h2><p>用户：<code id="who"></code> · 萝卜：<b id="carrotOut"></b>（门槛 &gt; 500）</p>'
-  + '<p>订阅链接（每人专属，24 小时有效；按客户端选一种粘贴）：</p>'
-  + '<p>sing-box / Hiddify / Karing（JSON）：<br><code id="subSingbox"></code> <button id="btnCopySingbox">复制</button></p>'
-  + '<p>Clash / mihomo / Stash / Verge（YAML）：<br><code id="subClash"></code> <button id="btnCopyClash">复制</button></p>'
-  + '<p>Surge：<br><code id="subSurge"></code> <button id="btnCopySurge">复制</button></p>'
-  + '<p>通用链接（hy2 / vless 列表，Shadowrocket / Loon / Egern 等）：<br><code id="subLinks"></code> <button id="btnCopyLinks">复制</button></p>'
-  + '<p class="muted">三个地址是同一个订阅 token、按格式分流；/c/?token=…&amp;client=…（sublinkPro 风格）和 /sub/&lt;token&gt;?format=… 都可用；base64 版见控制台接口 /api/sub-link。</p>'
-  + '<p class="muted" id="shareInfo"></p>'
-  + '<button id="btnImport">一键导入 sing-box</button> <button class="ghost" id="btnRefresh">刷新流量</button> <button class="ghost" id="btnRotate">刷新订阅链接（旧链接立即失效）</button> <button class="ghost" id="btnDisable">停用订阅链接</button>'
-  + '<p class="muted" id="copyMsg"></p></div>'
-  + '<div class="card"><h2>节点 · 总流量（探针）</h2><p class="muted" id="probeNote"></p><table><thead><tr><th>节点</th><th>状态 / 实时</th><th>今日</th><th>本月已用 / 限额</th><th>CPU / 运行</th></tr></thead><tbody id="nodeRows"></tbody></table></div></div>'
-  + '</div><script>'
-  + 'var session=null,subUrls=null,importUrl="";'
-  + 'function copyText(t,msg){if(navigator.clipboard){navigator.clipboard.writeText(t).then(function(){document.getElementById("copyMsg").textContent=msg||"已复制。"})}else{document.getElementById("copyMsg").textContent=t}}'
-  + 'function fmt(n){if(n==null)return "-";var u=["B","KB","MB","GB","TB"],i=0;while(n>=1024&&i<u.length-1){n/=1024;i++}return n.toFixed(n>=100?0:1)+" "+u[i]}'
-  + 'function fmtSpeed(n){return fmt(n)+"/s"}'
-  + 'function esc(s){return String(s==null?"":s).replace(/&/g,"&amp;").replace(/</g,"&lt;")} '
-  + 'function showMsg(t){document.getElementById("loginMsg").textContent=t}'
-  + 'function setShareInfo(sh){if(!sh)return;document.getElementById("shareInfo").textContent="订阅链接：创建于 "+new Date(sh.created_at).toLocaleString()+(sh.expires_at?"，到期 "+new Date(sh.expires_at).toLocaleString():"，永不过期")+"，已访问 "+(sh.access_count||0)+" 次"+(sh.last_access_at?"，上次访问 "+new Date(sh.last_access_at).toLocaleString():"")}'
-  + 'async function doAuth(body){showMsg("核验中…");var r=await fetch("/api/auth",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});var j=await r.json();if(!j.ok){if(j.reason==="carrot<=500"){document.getElementById("gatedCard").classList.remove("hidden");document.getElementById("dash").classList.add("hidden");document.getElementById("gatedMsg").innerHTML="萝卜：<b>"+j.carrot+"</b>，还差 <b class=\\"bad\\">"+j.shortfall+"</b> 才到 501（&gt; 500）。";showMsg("未达标：萝卜 "+j.carrot+"，还差 "+j.shortfall+"。")}else{showMsg("登录失败：" + (j.error||"未知错误"))}return} session=j.session;subUrls=j.sub_urls||{singbox:j.sub_url,clash:j.sub_url,links:j.sub_url};importUrl=j.import_url;document.getElementById("gatedCard").classList.add("hidden");document.getElementById("dash").classList.remove("hidden");document.getElementById("who").textContent=j.user_id+(j.username?" ("+j.username+")":"");document.getElementById("carrotOut").textContent=j.carrot;document.getElementById("demoBadge").textContent=j.demo?"（演示模式）":"";document.getElementById("subSingbox").textContent=subUrls.singbox;document.getElementById("subClash").textContent=subUrls.clash;document.getElementById("subSurge").textContent=subUrls.surge||subUrls.c_surge||"";document.getElementById("subLinks").textContent=subUrls.links;setShareInfo(j.share);showMsg("已登录，萝卜 "+j.carrot+"。");loadNodes()}'
-  + 'async function loadNodes(){var r=await fetch("/api/nodes",{credentials:"include",headers:session?{"X-Session":session}:{}});var j=await r.json();if(!j.ok){showMsg("拉取节点失败：" + (j.error||""));return} document.getElementById("probeNote").textContent="来源：" + j.probe_source + " · " + j.traffic_note;var html="";j.nodes.forEach(function(n){var pct=n.pct_used==null?"—":n.pct_used+"%";var bar=n.pct_used==null?"": "<div class=\\"bar\\"><i style=\\"width:"+Math.min(100,n.pct_used)+"%\\"></i></div>";var up=n.uptime==null?"—":Math.floor(n.uptime/86400)+" 天";html+="<tr><td><b>"+esc(n.name)+"</b><br><span class=\\"muted\\">"+esc(n.region)+" · 探针："+esc(n.probe_name)+" #"+n.probe_node_id+"</span></td><td><span class=\\"dot"+(n.online===true?"":" off")+"\\"></span> "+(n.online===true?"在线":n.online===false?"离线":"未知（不在探针里）")+"<br><span class=\\"muted\\">↑ "+fmtSpeed(n.net_tx)+" ↓ "+fmtSpeed(n.net_rx)+"</span></td><td>"+fmt(n.day_used)+"</td><td>"+fmt(n.month_used)+" / "+(n.traffic_limit?fmt(n.traffic_limit):"不限")+"<br><span class=\\"muted\\">已用 "+pct+" · 剩余 "+(n.remaining==null?"—":fmt(n.remaining))+"</span>"+bar+"</td><td>"+(n.cpu==null?"—":n.cpu.toFixed(1)+"%")+"<br><span class=\\"muted\\">"+up+"</span></td></tr>"});document.getElementById("nodeRows").innerHTML=html||"<tr><td colspan=\\"5\\">暂无节点</td></tr>"}'
-  + 'document.getElementById("btnToken").onclick=function(){var t=document.getElementById("token").value.trim();if(!t){showMsg("先粘贴 EMOS token");return}doAuth({token:t})};'
-  + 'document.getElementById("btnDemo").onclick=function(){doAuth({carrot:Number(document.getElementById("demoCarrot").value)})};'
-  + 'document.getElementById("btnDemo600").onclick=function(){document.getElementById("demoCarrot").value=600;doAuth({carrot:600})};'
-  + 'document.getElementById("btnDemo400").onclick=function(){document.getElementById("demoCarrot").value=400;doAuth({carrot:400})};'
-  + 'document.getElementById("btnCopySingbox").onclick=function(){if(subUrls)copyText(subUrls.singbox,"已复制 sing-box 订阅链接。")};'
-  + 'document.getElementById("btnCopyClash").onclick=function(){if(subUrls)copyText(subUrls.clash,"已复制 Clash 订阅链接。")};'
-  + 'document.getElementById("btnCopySurge").onclick=function(){if(subUrls)copyText(subUrls.surge||subUrls.c_surge||"","已复制 Surge 订阅链接。")};'
-  + 'document.getElementById("btnRotate").onclick=async function(){var r=await fetch("/api/sub/refresh",{method:"POST",credentials:"include",headers:session?{"X-Session":session}:{}});var j=await r.json();if(!j.ok){showMsg("刷新失败：" + (j.error||""));return}subUrls=j.sub_urls;importUrl=j.import_url;document.getElementById("subSingbox").textContent=subUrls.singbox;document.getElementById("subClash").textContent=subUrls.clash;document.getElementById("subSurge").textContent=subUrls.surge||subUrls.c_surge||"";document.getElementById("subLinks").textContent=subUrls.links;setShareInfo(j.share);document.getElementById("copyMsg").textContent="已生成新订阅链接，旧链接立即失效，请重新导入。"};'
-  + 'document.getElementById("btnDisable").onclick=async function(){if(!confirm("停用后订阅链接立即失效，重新登录才能恢复，确定？"))return;var r=await fetch("/api/sub/disable",{method:"POST",credentials:"include",headers:session?{"X-Session":session}:{}});var j=await r.json();if(j.ok){setShareInfo(j.share);document.getElementById("copyMsg").textContent="订阅链接已停用。"}};'
-  + 'document.getElementById("btnCopyLinks").onclick=function(){if(subUrls)copyText(subUrls.links,"已复制通用 hy2 订阅链接。")};'
-  + 'document.getElementById("btnImport").onclick=function(){if(importUrl)window.location.href=importUrl};'
-  + 'document.getElementById("btnRefresh").onclick=function(){loadNodes()};'
-  + '(function(){var q=new URLSearchParams(location.search);var e=q.get("emos_error");if(!e)return;var c=q.get("carrot");var m={no_token:"EMOS 回跳里没有带 token，请重新点“用 EMOS 账号登录”再试一次。",bad_state:"登录状态不对（uuid 不匹配或已过期），请重新点“用 EMOS 账号登录”。",not_signed_in:"EMOS 未确认这次登录（sign/check 未通过：可能是 token 无效，或今天还没在 EMOS 签到），请在 EMOS 登录/签到后再试。",carrot_insufficient:"萝卜不够：当前 "+(c||"?")+"，还差 "+(c?Math.max(0,501-c):"?")+" 才到 501（> 500）。"};showMsg(m[e]||("登录失败："+e));history.replaceState(null,"",location.pathname);})();'
-  + 'async function tryResume(){try{var r=await fetch("/api/nodes",{credentials:"include"});if(!r.ok)return;var j=await r.json();if(!j.ok)return;var r2=await fetch("/api/sub-link",{credentials:"include"});var j2=await r2.json();if(!j2.ok)return;subUrls=j2.sub_urls||{singbox:j2.sub_url,clash:j2.sub_url,links:j2.sub_url};importUrl=j2.import_url;document.getElementById("gatedCard").classList.add("hidden");document.getElementById("dash").classList.remove("hidden");document.getElementById("who").textContent=j.user_id;document.getElementById("carrotOut").textContent=j.carrot;document.getElementById("demoBadge").textContent=j.demo?"（演示模式）":"";document.getElementById("subSingbox").textContent=subUrls.singbox;document.getElementById("subClash").textContent=subUrls.clash;document.getElementById("subSurge").textContent=subUrls.surge||subUrls.c_surge||"";document.getElementById("subLinks").textContent=subUrls.links;setShareInfo(j2.share);showMsg("已登录，萝卜 "+j.carrot+"。");loadNodes();}catch(e){}}'
-  + 'tryResume();'
-  + 'setInterval(function(){if(!document.getElementById("dash").classList.contains("hidden"))loadNodes()},30000);'
-  + '</script></body></html>';
+const HTML = `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>EMOS 订阅控制台 · 原型</title><style>
+:root{--bg:#0a0e17;--card:rgba(255,255,255,.045);--card-solid:#121826;--border:rgba(255,255,255,.09);--text:#eef2f8;--muted:#94a3b8;--faint:#64748b;--accent:#6366f1;--accent2:#22d3ee;--grad:linear-gradient(135deg,#6366f1,#8b5cf6 48%,#22d3ee);--green:#34d399;--green-bg:rgba(52,211,153,.13);--red:#f87171;--red-bg:rgba(248,113,113,.13);--amber:#fbbf24;--amber-bg:rgba(251,191,36,.12);--radius:16px;--shadow:0 12px 32px rgba(0,0,0,.38)}
+*{box-sizing:border-box}
+body{margin:0;padding:28px 20px 48px;min-height:100vh;color:var(--text);font-family:system-ui,-apple-system,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;font-size:15px;line-height:1.55;background:radial-gradient(900px 480px at 12% -10%,rgba(99,102,241,.28),transparent 60%),radial-gradient(760px 480px at 92% 0%,rgba(34,211,238,.15),transparent 55%),linear-gradient(180deg,#0b0f1a,#090d16)}
+.wrap{max-width:920px;margin:0 auto}
+.topbar{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-bottom:6px}
+.brand-mark{width:44px;height:44px;border-radius:13px;background:var(--grad);display:flex;align-items:center;justify-content:center;box-shadow:0 6px 18px rgba(99,102,241,.45);flex:none}
+.brand-mark svg{width:24px;height:24px}
+h1{font-size:21px;margin:0;letter-spacing:.02em}
+.subtitle{color:var(--muted);font-size:13px;margin:2px 0 0}
+.pill{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:600;letter-spacing:.04em;padding:4px 11px;border-radius:999px;border:1px solid var(--border);background:rgba(255,255,255,.05);color:var(--muted);white-space:nowrap}
+.pill.ok{color:var(--green);background:var(--green-bg);border-color:rgba(52,211,153,.35)}
+.pill.bad{color:var(--red);background:var(--red-bg);border-color:rgba(248,113,113,.35)}
+.pill.warn{color:var(--amber);background:var(--amber-bg);border-color:rgba(251,191,36,.35)}
+.pill.accent{color:#c7d2fe;background:rgba(99,102,241,.16);border-color:rgba(99,102,241,.4)}
+.card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:20px 22px;margin:16px 0;box-shadow:var(--shadow);backdrop-filter:blur(8px)}
+.card h2{font-size:12px;font-weight:700;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);margin:0 0 14px}
+.muted{color:var(--muted);font-size:13px}
+.bad{color:var(--red)} .ok{color:var(--green)} .warn{color:var(--amber)}
+a{color:#93c5fd;text-decoration:none} a:hover{text-decoration:underline}
+label{display:block;font-size:13px;color:var(--muted);margin:12px 0 4px}
+input{width:100%;background:rgba(0,0,0,.32);color:var(--text);border:1px solid var(--border);border-radius:10px;padding:11px 13px;font:inherit;font-size:14px;outline:none;transition:border-color .15s,box-shadow .15s}
+input:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(99,102,241,.28)}
+button{font:inherit;font-size:14px;font-weight:600;color:#fff;background:var(--grad);border:0;border-radius:10px;padding:10px 18px;cursor:pointer;margin:6px 8px 6px 0;box-shadow:0 4px 14px rgba(99,102,241,.35);transition:transform .12s,box-shadow .12s,opacity .12s}
+button:hover{transform:translateY(-1px);box-shadow:0 7px 20px rgba(99,102,241,.45)}
+button:focus-visible{outline:2px solid var(--accent2);outline-offset:2px}
+button:disabled{opacity:.55;cursor:wait;transform:none}
+button.ghost{background:rgba(255,255,255,.07);color:var(--text);box-shadow:none;border:1px solid var(--border)}
+button.ghost:hover{background:rgba(255,255,255,.12);box-shadow:none}
+button.big{font-size:16px;padding:14px 24px;width:100%;margin:6px 0}
+.hero{text-align:center;padding:28px 24px}
+.hero h2{font-size:18px;letter-spacing:0;text-transform:none;color:var(--text);margin:0 0 6px}
+.hero .muted{margin:0 0 14px}
+.divider{display:flex;align-items:center;gap:12px;color:var(--faint);font-size:12px;letter-spacing:.08em;margin:18px 0 4px}
+.divider::before,.divider::after{content:"";flex:1;height:1px;background:var(--border)}
+.fallback{text-align:left;margin-top:6px}
+table{width:100%;border-collapse:collapse;font-size:14px}
+thead th{position:sticky;top:0;background:var(--card-solid);font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);border-bottom:1px solid var(--border)}
+th,td{text-align:left;padding:10px 12px;border-bottom:1px solid rgba(255,255,255,.06);vertical-align:top}
+tbody tr{transition:background .12s} tbody tr:hover{background:rgba(255,255,255,.03)}
+tbody tr:last-child td{border-bottom:0}
+.table-scroll{overflow-x:auto;margin:0 -4px;padding:0 4px}
+.bar{height:8px;background:rgba(255,255,255,.09);border-radius:99px;overflow:hidden;margin-top:6px}
+.bar i{display:block;height:100%;background:var(--grad);border-radius:99px}
+code{word-break:break-all;background:rgba(0,0,0,.4);padding:2px 7px;border-radius:6px;font-size:13px}
+.hidden{display:none!important}
+.stats{display:flex;gap:10px;flex-wrap:wrap;margin:4px 0 14px}
+.stat{flex:1;min-width:130px;background:rgba(0,0,0,.28);border:1px solid var(--border);border-radius:14px;padding:13px 16px}
+.stat .k{font-size:12px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted)}
+.stat .v{font-size:22px;font-weight:700;margin-top:3px}
+.stat .s{font-size:12px;color:var(--faint);margin-top:2px}
+.sub-row{display:flex;align-items:center;gap:10px;background:rgba(0,0,0,.28);border:1px solid var(--border);border-radius:10px;padding:10px 12px;margin:8px 0}
+.sub-row .lbl{flex:none;font-size:13px;color:var(--muted);width:172px}
+.sub-row code{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;background:none;padding:0}
+.sub-row button{flex:none;margin:0;padding:7px 13px;font-size:13px}
+.warn-card{border-color:rgba(251,191,36,.45);background:linear-gradient(180deg,rgba(251,191,36,.09),rgba(251,191,36,.02))}
+.warn-card h2{color:var(--amber)}
+.big-num{font-size:34px;font-weight:800;line-height:1.1;margin:6px 0}
+.actions{display:flex;flex-wrap:wrap;gap:2px;margin-top:12px}
+.msg{font-size:13px;color:var(--muted);margin:10px 0 0;min-height:18px}
+@media (max-width:640px){body{padding:18px 12px 36px}.card{padding:16px}.stat{min-width:calc(50% - 6px)}.sub-row{flex-wrap:wrap}.sub-row .lbl{width:100%}.sub-row code{white-space:normal}}
+</style></head><body><div class="wrap">
+<div class="topbar"><div class="brand-mark"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 4 14h6l-1 8 9-12h-6l1-8z"/></svg></div><div><h1>EMOS 订阅控制台</h1><p class="subtitle">EMOS 登录 · 萝卜 &gt; 500 解锁订阅</p></div><span class="pill accent" style="margin-left:auto">原型</span></div>
+<p class="muted">EMOS 登录 → 萝卜 &gt; 500 才能进控制台。节点流量是探针里的整台服务器流量（不是单条节点、不是每人用量）。</p>
 
+<div class="card hero" id="loginCard"><h2>登录</h2>
+<p class="muted">用你的 EMOS 账号登录，核验萝卜后进入控制台</p>
+<p><a href="/auth/emos"><button type="button" class="big">用 EMOS 账号登录</button></a></p>
+<p class="muted">点上面会跳到 EMOS（emos.best）登录，登录完自动跳回来，全程不用复制 token。第一次用建议走这里。</p>
+<div class="divider">备用登录</div>
+<div class="fallback">
+<label>EMOS Bearer Token（真实模式）</label><input id="token" type="password" placeholder="粘贴 EMOS token（只发给本服务器，不会保存到聊天记录）" autocomplete="off">
+<button type="button" id="btnToken">用 EMOS Token 登录</button>
+<p class="muted">或演示模式：直接填萝卜数，不调 EMOS。</p>
+<label>演示萝卜数</label><input id="demoCarrot" type="number" value="600">
+<button type="button" id="btnDemo">演示登录</button> <button type="button" class="ghost" id="btnDemo600">演示：600（达标）</button> <button type="button" class="ghost" id="btnDemo400">演示：400（不达标）</button>
+</div>
+<p id="loginMsg" class="msg"></p></div>
+
+<div class="card warn-card hidden" id="gatedCard"><h2>未达标</h2><div id="gatedMsg"></div><p class="muted">萝卜 &gt; 500 才能看到节点和订阅链接。去 EMOS 签到 / 赚萝卜后再来。</p></div>
+
+<div class="hidden" id="dash">
+<div class="stats">
+<div class="stat"><div class="k">萝卜</div><div class="v" id="statCarrot">—</div><div class="s">门槛 &gt; 500</div></div>
+<div class="stat"><div class="k">节点</div><div class="v" id="statNodes">—</div><div class="s">订阅内容</div></div>
+<div class="stat"><div class="k">订阅访问</div><div class="v" id="statAccess">—</div><div class="s">本条链接</div></div>
+</div>
+<div class="card"><h2>已达标 <span id="demoBadge"></span></h2><p>用户：<code id="who"></code> · 萝卜：<b id="carrotOut"></b>（门槛 &gt; 500）</p>
+<p class="muted">订阅链接（每人专属，24 小时有效；按客户端选一种粘贴）：</p>
+<div class="sub-row"><span class="lbl">sing-box / Hiddify / Karing</span><code id="subSingbox"></code><button type="button" id="btnCopySingbox">复制</button></div>
+<div class="sub-row"><span class="lbl">Clash / mihomo / Verge</span><code id="subClash"></code><button type="button" id="btnCopyClash">复制</button></div>
+<div class="sub-row"><span class="lbl">Surge</span><code id="subSurge"></code><button type="button" id="btnCopySurge">复制</button></div>
+<div class="sub-row"><span class="lbl">通用链接（hy2 / vless）</span><code id="subLinks"></code><button type="button" id="btnCopyLinks">复制</button></div>
+<p class="muted">三个地址是同一个订阅 token、按格式分流；/c/?token=…&amp;client=…（sublinkPro 风格）和 /sub/&lt;token&gt;?format=… 都可用；base64 版见控制台接口 /api/sub-link。</p>
+<p class="muted" id="shareInfo"></p>
+<div class="actions"><button type="button" id="btnImport">一键导入 sing-box</button> <button type="button" class="ghost" id="btnRefresh">刷新流量</button> <button type="button" class="ghost" id="btnRotate">刷新订阅链接（旧链接立即失效）</button> <button type="button" class="ghost" id="btnDisable">停用订阅链接</button></div>
+<p class="muted" id="copyMsg"></p></div>
+<div class="card"><h2>节点 · 总流量（探针）</h2><p class="muted" id="probeNote"></p><div class="table-scroll"><table><thead><tr><th>节点</th><th>状态 / 实时</th><th>今日</th><th>本月已用 / 限额</th><th>CPU / 运行</th></tr></thead><tbody id="nodeRows"></tbody></table></div></div>
+</div>
+</div><script>
+var session=null,subUrls=null,importUrl="";
+function copyText(t,msg){if(navigator.clipboard){navigator.clipboard.writeText(t).then(function(){document.getElementById("copyMsg").textContent=msg||"已复制。"})}else{document.getElementById("copyMsg").textContent=t}}
+function fmt(n){if(n==null)return "-";var u=["B","KB","MB","GB","TB"],i=0;while(n>=1024&&i<u.length-1){n/=1024;i++}return n.toFixed(n>=100?0:1)+" "+u[i]}
+function fmtSpeed(n){return fmt(n)+"/s"}
+function esc(s){return String(s==null?"":s).replace(/&/g,"&amp;").replace(/</g,"&lt;")}
+function showMsg(t){document.getElementById("loginMsg").textContent=t}
+function setShareInfo(sh){
+  if(!sh)return;
+  document.getElementById("shareInfo").textContent="订阅链接：创建于 "+new Date(sh.created_at).toLocaleString()+(sh.expires_at?"，到期 "+new Date(sh.expires_at).toLocaleString():"，永不过期")+"，已访问 "+(sh.access_count||0)+" 次"+(sh.last_access_at?"，上次访问 "+new Date(sh.last_access_at).toLocaleString():"");
+  var sa=document.getElementById("statAccess");if(sa)sa.textContent=sh.access_count||0;
+}
+async function doAuth(body){
+  showMsg("核验中…");
+  var r;
+  try{r=await fetch("/api/auth",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});}
+  catch(e){showMsg("登录失败：网络错误，"+e.message);return;}
+  var j=await r.json();
+  if(!j.ok){
+    if(j.reason==="carrot<=500"){
+      document.getElementById("gatedCard").classList.remove("hidden");
+      document.getElementById("dash").classList.add("hidden");
+      document.getElementById("gatedMsg").innerHTML="萝卜：<b>"+j.carrot+"</b><div class=\"big-num bad\">还差 "+j.shortfall+"</div>才到 501（&gt; 500）。";
+      showMsg("未达标：萝卜 "+j.carrot+"，还差 "+j.shortfall+"。");
+    }else{showMsg("登录失败：" + (j.error||"未知错误"))}
+    return;
+  }
+  session=j.session;subUrls=j.sub_urls||{singbox:j.sub_url,clash:j.sub_url,links:j.sub_url};importUrl=j.import_url;
+  document.getElementById("gatedCard").classList.add("hidden");
+  document.getElementById("dash").classList.remove("hidden");
+  document.getElementById("who").textContent=j.user_id+(j.username?" ("+j.username+")":"");
+  document.getElementById("carrotOut").textContent=j.carrot;
+  document.getElementById("statCarrot").textContent=j.carrot;
+  document.getElementById("demoBadge").textContent=j.demo?"（演示模式）":"";
+  document.getElementById("subSingbox").textContent=subUrls.singbox;
+  document.getElementById("subClash").textContent=subUrls.clash;
+  document.getElementById("subSurge").textContent=subUrls.surge||subUrls.c_surge||"";
+  document.getElementById("subLinks").textContent=subUrls.links;
+  setShareInfo(j.share);
+  showMsg("已登录，萝卜 "+j.carrot+"。");
+  loadNodes();
+}
+async function loadNodes(){
+  var r;
+  try{r=await fetch("/api/nodes",{credentials:"include",headers:session?{"X-Session":session}:{}});}
+  catch(e){showMsg("拉取节点失败：网络错误，"+e.message);return;}
+  var j=await r.json();
+  if(!j.ok){showMsg("拉取节点失败：" + (j.error||""));return}
+  document.getElementById("probeNote").textContent="来源：" + j.probe_source + " · " + j.traffic_note;
+  document.getElementById("statNodes").textContent=j.nodes.length;
+  var html="";
+  j.nodes.forEach(function(n){
+    var pct=n.pct_used==null?"—":n.pct_used+"%";
+    var bar=n.pct_used==null?"":"<div class=\"bar\"><i style=\"width:"+Math.min(100,n.pct_used)+"\"></i></div>";
+    var up=n.uptime==null?"—":Math.floor(n.uptime/86400)+" 天";
+    var pill=n.online===true?'<span class="pill ok">在线</span>':n.online===false?'<span class="pill bad">离线</span>':'<span class="pill">未知 · 不在探针里</span>';
+    html+="<tr><td><b>"+esc(n.name)+"</b><br><span class=\"muted\">"+esc(n.region)+" · 探针："+esc(n.probe_name)+" #"+n.probe_node_id+"</span></td><td>"+pill+"<br><span class=\"muted\">↑ "+fmtSpeed(n.net_tx)+" ↓ "+fmtSpeed(n.net_rx)+"</span></td><td>"+fmt(n.day_used)+"</td><td>"+fmt(n.month_used)+" / "+(n.traffic_limit?fmt(n.traffic_limit):"不限")+"<br><span class=\"muted\">已用 "+pct+" · 剩余 "+(n.remaining==null?"—":fmt(n.remaining))+"</span>"+bar+"</td><td>"+(n.cpu==null?"—":n.cpu.toFixed(1)+"%")+"<br><span class=\"muted\">"+up+"</span></td></tr>";
+  });
+  document.getElementById("nodeRows").innerHTML=html||"<tr><td colspan=\"5\">暂无节点</td></tr>";
+}
+document.getElementById("btnToken").onclick=function(){var t=document.getElementById("token").value.trim();if(!t){showMsg("先粘贴 EMOS token");return}doAuth({token:t})};
+document.getElementById("btnDemo").onclick=function(){doAuth({carrot:Number(document.getElementById("demoCarrot").value)})};
+document.getElementById("btnDemo600").onclick=function(){document.getElementById("demoCarrot").value=600;doAuth({carrot:600})};
+document.getElementById("btnDemo400").onclick=function(){document.getElementById("demoCarrot").value=400;doAuth({carrot:400})};
+document.getElementById("btnCopySingbox").onclick=function(){if(subUrls)copyText(subUrls.singbox,"已复制 sing-box 订阅链接。")};
+document.getElementById("btnCopyClash").onclick=function(){if(subUrls)copyText(subUrls.clash,"已复制 Clash 订阅链接。")};
+document.getElementById("btnCopySurge").onclick=function(){if(subUrls)copyText(subUrls.surge||subUrls.c_surge||"","已复制 Surge 订阅链接。")};
+document.getElementById("btnRotate").onclick=async function(){var r=await fetch("/api/sub/refresh",{method:"POST",credentials:"include",headers:session?{"X-Session":session}:{}});var j=await r.json();if(!j.ok){showMsg("刷新失败：" + (j.error||""));return}subUrls=j.sub_urls;importUrl=j.import_url;document.getElementById("subSingbox").textContent=subUrls.singbox;document.getElementById("subClash").textContent=subUrls.clash;document.getElementById("subSurge").textContent=subUrls.surge||subUrls.c_surge||"";document.getElementById("subLinks").textContent=subUrls.links;setShareInfo(j.share);document.getElementById("copyMsg").textContent="已生成新订阅链接，旧链接立即失效，请重新导入。"};
+document.getElementById("btnDisable").onclick=async function(){if(!confirm("停用后订阅链接立即失效，重新登录才能恢复，确定？"))return;var r=await fetch("/api/sub/disable",{method:"POST",credentials:"include",headers:session?{"X-Session":session}:{}});var j=await r.json();if(j.ok){setShareInfo(j.share);document.getElementById("copyMsg").textContent="订阅链接已停用。"}};
+document.getElementById("btnCopyLinks").onclick=function(){if(subUrls)copyText(subUrls.links,"已复制通用 hy2 订阅链接。")};
+document.getElementById("btnImport").onclick=function(){if(importUrl)window.location.href=importUrl};
+document.getElementById("btnRefresh").onclick=function(){loadNodes()};
+(function(){var q=new URLSearchParams(location.search);var e=q.get("emos_error");if(!e)return;var c=q.get("carrot");var m={no_token:"EMOS 回跳里没有带 token，请重新点“用 EMOS 账号登录”再试一次。",bad_state:"登录状态不对（uuid 不匹配或已过期），请重新点“用 EMOS 账号登录”。",not_signed_in:"EMOS 未确认这次登录（sign/check 未通过：可能是 token 无效，或今天还没在 EMOS 签到），请在 EMOS 登录/签到后再试。",carrot_insufficient:"萝卜不够：当前 "+(c||"?")+"，还差 "+(c?Math.max(0,501-c):"?")+" 才到 501（> 500）。"};showMsg(m[e]||("登录失败："+e));history.replaceState(null,"",location.pathname);})();
+async function tryResume(){
+  try{
+    var r=await fetch("/api/nodes",{credentials:"include"});
+    if(!r.ok)return;
+    var j=await r.json();
+    if(!j.ok)return;
+    var r2=await fetch("/api/sub-link",{credentials:"include"});
+    var j2=await r2.json();
+    if(!j2.ok)return;
+    subUrls=j2.sub_urls||{singbox:j2.sub_url,clash:j2.sub_url,links:j2.sub_url};
+    importUrl=j2.import_url;
+    document.getElementById("gatedCard").classList.add("hidden");
+    document.getElementById("dash").classList.remove("hidden");
+    document.getElementById("who").textContent=j.user_id;
+    document.getElementById("carrotOut").textContent=j.carrot;
+    document.getElementById("statCarrot").textContent=j.carrot;
+    document.getElementById("demoBadge").textContent=j.demo?"（演示模式）":"";
+    document.getElementById("subSingbox").textContent=subUrls.singbox;
+    document.getElementById("subClash").textContent=subUrls.clash;
+    document.getElementById("subSurge").textContent=subUrls.surge||subUrls.c_surge||"";
+    document.getElementById("subLinks").textContent=subUrls.links;
+    setShareInfo(j2.share);
+    showMsg("已登录，萝卜 "+j.carrot+"。");
+    loadNodes();
+  }catch(e){}
+}
+tryResume();
+setInterval(function(){if(!document.getElementById("dash").classList.contains("hidden"))loadNodes()},30000);
+</script></body></html>`;
 const server = http.createServer(async (req, res) => {
   try {
     const u = new URL(req.url, 'http://localhost');
