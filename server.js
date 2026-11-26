@@ -1,4 +1,4 @@
-// EMOS-gated sing-box gateway v1.5.3 — zero dependencies.
+// EMOS-gated sing-box gateway v1.5.4 — zero dependencies.
 // Node >= 18 (uses global fetch). Run: node server.js  (PORT env, default 3000)
 // Scope: EMOS login -> carrot > 500 -> console (nodes + per-user sub links)
 // + NODE TOTAL traffic only, from https://1e.lol/api/nodes. NO per-user traffic.
@@ -19,7 +19,7 @@ const path = require('path');
 const crypto = require('crypto');
 
 const PORT = parseInt(process.env.PORT || '3000', 10);
-const VERSION = '1.5.3';
+const VERSION = '1.5.4';
 const CONFIG_PATH = path.join(__dirname, 'config', 'nodes.json');
 const CLASH_TEMPLATE_PATH = path.join(__dirname, 'config', 'templates', 'clash.yaml');
 const SINGBOX_TEMPLATE_PATH = path.join(__dirname, 'config', 'templates', 'singbox.json');
@@ -1793,10 +1793,29 @@ pre{background:rgba(0,0,0,.4);border:1px solid var(--border);border-radius:10px;
 .cmd code{background:none;padding:0;white-space:nowrap}
 .cmd button{margin:0 0 0 auto;flex:none}
 .form-grid{display:grid;grid-template-columns:1fr 1fr;gap:4px 16px}
-.msg{font-size:13px;color:var(--muted);margin:8px 0 0;min-height:18px}
+.msg{font-size:13px;color:var(--muted);margin:10px 0 0;padding:9px 12px;border-radius:10px;border:1px solid transparent;background:rgba(99,102,241,.08)}
 .msg.err{color:var(--red)} .msg.ok{color:var(--green)}
 .section-head{display:flex;align-items:baseline;justify-content:space-between;gap:10px;flex-wrap:wrap}
-@media (max-width:640px){body{padding:18px 12px 36px}.card{padding:16px}.form-grid{grid-template-columns:1fr}.stat{min-width:calc(50% - 6px)}.topbar{flex-wrap:nowrap}.topbar h1{font-size:19px}.brand-mark{width:38px;height:38px;border-radius:11px}.topbar .pill{display:none}.topbar #btnTheme{margin-left:auto}}
+/* tab navigation: one section at a time instead of one long scroll */
+.tabs{display:flex;gap:6px;margin:18px 0 4px;padding:5px;background:var(--card);border:1px solid var(--border);border-radius:14px;position:sticky;top:8px;z-index:30;backdrop-filter:blur(12px)}
+.tabs button.tab{flex:1;margin:0;padding:10px 8px;text-align:center;background:transparent;color:var(--muted);box-shadow:none;border:1px solid transparent;border-radius:10px;font-size:14px;font-weight:600}
+.tabs button.tab:hover{background:rgba(255,255,255,.07);color:var(--text);transform:none;box-shadow:none}
+.tabs button.tab.active{background:var(--grad);color:#fff;box-shadow:0 4px 14px rgba(99,102,241,.35)}
+html[data-theme="light"] .tabs button.tab:hover{background:rgba(15,23,42,.05)}
+.panel{animation:panelIn .18s ease}
+@keyframes panelIn{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:none}}
+/* status messages: colored, readable feedback bar */
+.msg.ok{color:var(--green);background:var(--green-bg);border-color:rgba(52,211,153,.32)}
+.msg.err{color:var(--red);background:var(--red-bg);border-color:rgba(248,113,113,.32)}
+.msg:empty{display:none}
+/* health strip: a compact status bar under the stats */
+.healthline{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:12px 0;padding:11px 16px;background:var(--card);border:1px solid var(--border);border-radius:14px}
+.healthline .muted{margin-right:auto}
+.healthline button{margin:0}
+/* empty table state */
+.empty{padding:30px 14px;text-align:center;color:var(--faint)}
+.empty::before{content:"";display:block;width:34px;height:34px;margin:0 auto 10px;border-radius:11px;background:var(--card);border:1px solid var(--border)}
+@media (max-width:640px){body{padding:18px 12px 36px}.card{padding:16px}.form-grid{grid-template-columns:1fr}.stat{min-width:calc(50% - 6px)}.topbar{flex-wrap:nowrap}.topbar h1{font-size:19px}.brand-mark{width:38px;height:38px;border-radius:11px}.topbar .pill{display:none}.topbar #btnTheme{margin-left:auto}.tabs button.tab{font-size:13px;padding:9px 4px}.healthline{padding:10px 12px}}
 </style></head><body><div class="wrap">
 <div class="topbar"><div class="brand-mark"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 3 7v6c0 5 4 8 9 9 5-1 9-4 9-9V7l-9-5z"/><path d="M9 12l2 2 4-4"/></svg></div><div><h1>后台管理</h1><p class="subtitle">EMOS 订阅网关 · 只有站长能进</p></div><span class="pill accent" style="margin-left:auto">站长后台 · {{VERSION}}</span><button type="button" class="ghost" id="btnTheme" style="margin:0 0 0 8px">白天模式</button></div>
 <p class="muted">管理节点、分享链接与设置，改动立即生效。</p>
@@ -1818,9 +1837,11 @@ pre{background:rgba(0,0,0,.4);border:1px solid var(--border);border-radius:10px;
 
 <div class="hidden" id="adminApp">
 <div class="stats" id="healthChips"></div>
-<p><span id="healthLine" class="muted"></span> <button type="button" class="ghost" id="btnLogout">退出登录</button></p>
+<div class="healthline"><span id="healthLine" class="muted"></span><button type="button" class="ghost" id="btnLogout">退出登录</button></div>
 
-<div class="card"><div class="section-head"><h2>节点 <span class="count" id="nodeCount"></span></h2><span class="pill" id="probeNote"></span></div>
+<nav class="tabs" id="adminTabs"><button type="button" class="tab active" data-tab="nodes">节点</button><button type="button" class="tab" data-tab="shares">分享</button><button type="button" class="tab" data-tab="settings">设置</button></nav>
+
+<div class="card panel" data-panel="nodes"><div class="section-head"><h2>节点 <span class="count" id="nodeCount"></span></h2><span class="pill" id="probeNote"></span></div>
 <div class="table-scroll"><table><thead><tr><th>Key</th><th>名称</th><th>到期</th><th>协议</th><th>服务器</th><th>探针</th><th>操作</th></tr></thead><tbody id="nodeRows"></tbody></table></div>
 <h2 id="formTitle" style="margin-top:24px">添加节点</h2>
 <label>节点链接（hy2:// / hysteria2:// / vless://）</label>
@@ -1833,12 +1854,12 @@ pre{background:rgba(0,0,0,.4);border:1px solid var(--border);border-radius:10px;
 <button type="button" id="btnParse">解析预览</button> <button type="button" id="btnSaveNode">保存节点</button> <button type="button" class="ghost hidden" id="btnCancelEdit">取消编辑</button>
 <pre id="nodePreview" class="hidden"></pre><p id="nodeMsg" class="msg"></p></div>
 
-<div class="card"><h2>分享链接（订阅）</h2>
+<div class="card panel hidden" data-panel="shares"><h2>分享链接（订阅）</h2>
 <p class="muted" style="margin-top:0">用户登录后自动创建，每人一条；Token 仅显示前 6 位。</p>
 <div class="table-scroll"><table><thead><tr><th>Token</th><th>用户</th><th>创建 / 到期</th><th>状态</th><th>访问</th><th>最后 IP / 访问</th><th>操作</th></tr></thead><tbody id="shareRows"></tbody></table></div>
 <p><button type="button" class="danger" id="btnRevokeAll">全部吊销（所有订阅立即失效）</button></p><p id="shareMsg" class="msg"></p></div>
 
-<div class="card"><h2>设置</h2>
+<div class="card panel hidden" data-panel="settings"><h2>设置</h2>
 <div class="form-grid">
 <div><label>萝卜门槛（默认 500）</label><input id="setThreshold" type="number"></div>
 <div><label>分享有效期（小时，0 = 永不过期）</label><input id="setTtl" type="number" step="any"></div>
@@ -1912,7 +1933,7 @@ async function loadNodes(){
     var probe=n.probe_node_id==null?'—':'#'+n.probe_node_id+' '+(n.online===true?'<span class="pill ok">在线</span>':n.online===false?'<span class="pill bad">离线</span>':'<span class="pill">不在探针里</span>');
     h+='<tr><td><code>'+esc(n.key)+'</code></td><td><b>'+esc(n.name)+'</b><br><span class="muted">'+esc(n.region)+'</span></td><td>'+(n.expires_at?esc(n.expires_at):(n.expires_at_probe?esc(n.expires_at_probe)+' <span class="muted">探针</span>':'—'))+'</td><td><span class="pill">'+esc(n.protocol||'—')+'</span></td><td>'+esc(n.server||'—')+':'+(n.server_port==null?'—':n.server_port)+'<br><span class="muted">sni: '+esc(n.sni||'—')+'</span></td><td>'+probe+'</td><td><button type="button" onclick="editNode('+i+')">编辑</button> <button type="button" class="ghost" onclick="moveNode('+i+',-1)">↑</button><button type="button" class="ghost" onclick="moveNode('+i+',1)">↓</button> <button type="button" class="danger" onclick="delNode(\\''+esc(n.key)+'\\')">删除</button></td></tr>';
   });
-  document.getElementById('nodeRows').innerHTML=h||'<tr><td colspan="7">暂无节点</td></tr>';
+  document.getElementById('nodeRows').innerHTML=h||'<tr><td colspan="7"><div class="empty">暂无节点 · 在下方添加第一条</div></td></tr>';
   return true;
 }
 async function loadShares(){
@@ -1922,7 +1943,7 @@ async function loadShares(){
   r.json.shares.forEach(function(s){
     h+='<tr><td><code>'+esc(s.token_masked)+'</code></td><td><code>'+esc(s.user_id)+'</code></td><td>'+fmtTime(s.created_at)+'<br><span class="muted">到期：'+fmtTime(s.expires_at)+'</span></td><td>'+(s.enabled?'<span class="pill ok">启用</span>':'<span class="pill bad">停用</span>')+'</td><td>'+s.access_count+' 次</td><td>'+esc(s.last_ip||'—')+'<br><span class="muted">'+fmtTime(s.last_access_at)+'</span></td><td><button type="button" onclick="shareAct(\\''+s.id+'\\',\\'refresh\\')">刷新</button> '+(s.enabled?'<button type="button" class="ghost" onclick="shareAct(\\''+s.id+'\\',\\'disable\\')">停用</button>':'<button type="button" class="ghost" onclick="shareAct(\\''+s.id+'\\',\\'enable\\')">启用</button>')+' <button type="button" class="danger" onclick="shareDel(\\''+s.id+'\\')">吊销</button></td></tr>';
   });
-  document.getElementById('shareRows').innerHTML=h||'<tr><td colspan="7">暂无分享（还没有用户登录过）</td></tr>';
+  document.getElementById('shareRows').innerHTML=h||'<tr><td colspan="7"><div class="empty">暂无分享 · 用户首次登录后自动出现</div></td></tr>';
 }
 async function loadSettings(){
   var r=await api('GET','/api/admin/settings');
@@ -1996,6 +2017,20 @@ document.getElementById('btnSaveNode').onclick=async function(){var link=documen
 document.getElementById('btnCancelEdit').onclick=function(){editingKey=null;document.getElementById('formTitle').textContent='添加节点';document.getElementById('nodeLink').value='';document.getElementById('nodeName').value='';document.getElementById('nodeRegion').value='';document.getElementById('nodeProbe').value='';document.getElementById('nodeExpiry').value='';document.getElementById('nodeKey').value='';document.getElementById('nodeKey').disabled=false;document.getElementById('btnCancelEdit').classList.add('hidden');document.getElementById('nodeMsg').textContent=''};
 document.getElementById('btnRevokeAll').onclick=async function(){if(!confirm('确定吊销全部订阅链接？所有用户的订阅立即失效，他们需要重新登录。'))return;var r=await api('POST','/api/admin/shares/revoke-all');if(!r.json.ok){document.getElementById('shareMsg').textContent='操作失败：'+(r.json.error||'');return}document.getElementById('shareMsg').textContent='已吊销 '+r.json.revoked+' 条分享。';await loadShares()};
 document.getElementById('btnSaveSettings').onclick=async function(){var body={carrot_threshold:Number(document.getElementById('setThreshold').value),share_ttl_hours:Number(document.getElementById('setTtl').value),name_rule:document.getElementById('setNameRule').value,probe_cache_seconds:Number(document.getElementById('setProbeCache').value)};var r=await api('PUT','/api/admin/settings',body);if(!r.json.ok){document.getElementById('setMsg').textContent='保存失败：'+(r.json.error||'');return}var w=(r.json.warnings||[]).join(' ');document.getElementById('setMsg').textContent='已保存，立即生效。'+(w?' 注意：'+w:'');await loadSettings()};
+/* tab navigation — pure UI, no data/API change; remembers last tab locally */
+function switchTab(name){
+  var tabs=document.querySelectorAll('#adminTabs .tab');
+  for(var i=0;i<tabs.length;i++)tabs[i].classList.toggle('active',tabs[i].getAttribute('data-tab')===name);
+  var panels=document.querySelectorAll('[data-panel]');
+  for(var j=0;j<panels.length;j++)panels[j].classList.toggle('hidden',panels[j].getAttribute('data-panel')!==name);
+  try{localStorage.setItem('emos-admin-tab',name)}catch(e){}
+}
+(function initTabs(){
+  var tabs=document.querySelectorAll('#adminTabs .tab');
+  for(var i=0;i<tabs.length;i++)(function(b){b.onclick=function(){switchTab(b.getAttribute('data-tab'))}})(tabs[i]);
+  var saved=null;try{saved=localStorage.getItem('emos-admin-tab')}catch(e){}
+  if(saved)switchTab(saved);
+})();
 initAdmin();
 </script></body></html>`;
 
