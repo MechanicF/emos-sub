@@ -19,6 +19,25 @@ PORT=3000 ADMIN_TOKEN=你的口令 node server.js
 - 后台运行（断开终端也不停）：`PORT=3000 ADMIN_TOKEN=你的口令 nohup node server.js > server.log 2>&1 &`
 - 也可以用仓库里的脚本：`PORT=3000 ADMIN_TOKEN=你的口令 ./start.sh`（脚本会检查 Node 版本、端口是否被占用，没设 `ADMIN_TOKEN` 时会提示只启动用户控制台）。
 
+## 控制脚本（manage.sh）
+
+服务器上部署用 `./manage.sh`，不用每次手敲命令：
+
+```bash
+./manage.sh install --port 3000 --public-url https://sub.example.com   # 安装并启动（默认 /opt/emos-sub）
+./manage.sh status        # 运行状态、端口、健康检查、节点数、版本
+./manage.sh port 8080     # 改端口并重启
+./manage.sh autostart on  # 开机自启（systemd；无 systemd 的机器用 cron @reboot）
+./manage.sh logs -f       # 看日志 / 实时跟随
+./manage.sh update        # 备份配置后 git pull 最新代码并重启
+./manage.sh backup        # 备份 .env + config/
+./manage.sh set-token <新口令>   # 改后台口令并重启
+./manage.sh set-url <域名>      # 改公开域名并重启
+./manage.sh uninstall     # 先备份配置，确认后停服务并删除
+```
+
+完整命令见 `./manage.sh help`。`install` 不给 `--admin-token` 时会随机生成一个后台口令并只显示一次；配置存在安装目录的 `.env`（600 权限）。
+
 ## 运行（手动）
 
 ```bash
@@ -30,7 +49,7 @@ node server.js
 
 ## 流程（已锁定的范围）
 
-1. 用户登录：贴 EMOS Bearer Token，或演示模式直接填萝卜数。
+1. 用户登录：点控制台上的“用 EMOS 账号登录”，跳到 EMOS（`emos.best/link?uuid=…&name=emos-sub&url=…`）登录，登录完 EMOS 把浏览器跳回本站回调，服务端核验后发会话（详见“EMOS 登录（/link 跳转回调）”一节）。备用：手动粘贴 EMOS Bearer Token，或演示模式直接填萝卜数。
 2. 核验：真实模式调 `https://emos.best/api/carrot/current`
    （`Authorization: Bearer <token>`）和 `/api/sign/check` 取 `user_id`；
    只有萝卜 **> 500（严格大于）** 才放行，≤ 500 返回 `ok:false, reason:carrot<=500, shortfall`，
@@ -44,6 +63,76 @@ node server.js
 4. 订阅：`GET /c/?token=<token>&client=<client>` 或 `GET /sub/:token`
    按客户端自动识别返回可用格式（见下节）。
    真实会话每 10 分钟重新核验一次萝卜，掉到 ≤ 500 就返回 403、链接失效。
+
+## EMOS 登录（/link 跳转回调）
+
+主登录方式，不用弹窗、不用用户手动复制 token。参考实现是真实 EMOS 客户端
+somebyteorg/emos_music：登录按钮不做弹窗，直接
+`window.location.href = getEmosLoginUrl(window.location.origin)`，
+其中 `getEmosLoginUrl` 拼出：
+
+```
+GET https://emos.best/link?uuid=<crypto.randomUUID()>&name=<应用名>&url=<回调地址>
+```
+
+本站的实现（`server.js` 里的 `/auth/emos`、`/auth/emos/callback`）：
+
+1. 点控制台上的“用 EMOS 账号登录” → `GET /auth/emos`：服务端生成
+   `uuid = crypto.randomUUID()`，存进内存待处理登录表（10 分钟有效，
+   用一次就删），然后 302 跳到
+   `https://emos.best/link?uuid=<uuid>&name=emos-sub&url=<回调地址>`。
+   `name` 默认 `emos-sub`，可用环境变量 `EMOS_APP_NAME` 改。
+2. 用户在 EMOS 登录后，EMOS 把浏览器重定向回回调地址
+   `GET /auth/emos/callback?token=<token>`（也接受 `?access_token=` 作为
+   备用别名，`?token=` 优先）。token 只在 URL 查询串里——服务端看不到
+   URL 的 `#hash` 部分，如果 EMOS 哪天把 token 放 hash 里，回调会报
+   `no_token`，到时再处理。
+3. 回调先验 `uuid`：回跳里带了 `uuid` 但和待处理表里对不上（或已过期）
+   → 跳回 `/?emos_error=bad_state`，不接受；回跳里没带 `uuid` 也接受，
+   因为 emos-api 的 Postman 文件里 link 登录跳转没有响应示例，
+   **EMOS 是否回传 uuid 是未验证的**——token 本身下面还要服务端核验，
+   伪造的回跳登不进来。
+4. 服务端核验 token：`GET https://emos.best/api/sign/check`
+   （`Authorization: Bearer <token>`），非 200 或 `is_sign !== true`
+   → `/?emos_error=not_signed_in`。注意：sign/check 只返回
+   `{is_sign, user_id}`，不返回 token；这里用它确认 token 是有效的登录。
+   有个坑：如果 EMOS 的 `is_sign` 意思是“今天已签到”而不是“已登录”，
+   那今天还没签到的有效用户也会被挡在这里，错误页会提示先去 EMOS
+   签到；如果 Simon 实测发现有效用户被挡，把这步放宽成“只看非 200”。
+5. 再调 `GET https://emos.best/api/carrot/current` 取萝卜：
+   ≤ 500 → `/?emos_error=carrot_insufficient&carrot=<n>`，
+   控制台显示“还差 X 到 501”，和手动登录一样；> 500 才放行。
+6. 放行后走和 `POST /api/auth` 完全同一条会话签发逻辑（共用
+   `issueUserSession`，不复制代码）：创建 session + 每人专属分享链接，
+   发一个 HttpOnly 会话 cookie（`emos_session`，24 小时），302 跳回 `/`，
+   URL 是干净的——token 不出现在跳转地址里、不渲染进页面、不写日志，
+   只存在内存 session 里，和手动粘贴 token 的流程一样。
+   控制台打开时如果 cookie 还有效，会自动恢复成已登录状态，不用重新点。
+
+回调地址怎么来：优先用环境变量 `PUBLIC_URL`（例如
+`PUBLIC_URL=https://sub.example.com`，生产部署时设这个）；没设就用请求
+的 Host 头（`x-forwarded-proto` 或 socket 是否加密决定 http/https）。
+**回调地址要能被用户的浏览器访问到，不需要被 EMOS 的服务器访问到**
+（EMOS 只是让浏览器跳过去）——所以同一台机器上测试时
+`http://127.0.0.1:3000/auth/emos/callback` 能用；但远程用户登录时，
+必须配好公网域名 + `PUBLIC_URL`，否则回调会跳到一个用户打不开的内网地址。
+
+错误码（控制台打开时会显示中文提示，然后用 `history.replaceState`
+把查询串清掉）：
+
+| `?emos_error=` | 意思 |
+|---|---|
+| `no_token` | EMOS 回跳里没带 token |
+| `bad_state` | 回跳的 uuid 和待处理登录对不上（或已过期 10 分钟） |
+| `not_signed_in` | sign/check 未通过（token 无效，或今天还没在 EMOS 签到） |
+| `carrot_insufficient` | 萝卜 ≤ 500，附带 `&carrot=<n>`，控制台算还差多少 |
+
+备用登录（控制台登录卡片下方，标明“备用”）：手动粘贴 EMOS Bearer Token
+（`POST /api/auth {token}`）和演示填萝卜数（`{carrot}`），本地测试、
+或 `/link` 跳转出问题时用。演示不调 EMOS，只走内存 session。
+
+`GET /api/auth/emos/login-url` 直接返回当前请求的登录跳转地址
+`{login_url}`（测试 / 调试用，不用登录）。
 
 ## 订阅格式（sublinkPro 风格：/c/ + client 参数）
 
@@ -176,7 +265,8 @@ profile-update-interval: 24   ← 仅 Clash / mihomo 响应
 
 - 演示 600：进控制台，能看到节点和订阅链接。
 - 演示 400：显示未达标，还差 101（到 501），节点和链接隐藏。
-- 真实 Token：先在演示里跑通，再贴自己的 token 测试。**不要把 token 发到聊天里**，
+- 真实登录：先在演示里跑通，再点“用 EMOS 账号登录”走 /link 跳转实测。
+  手动粘贴 token 只是备用。**不要把 token 发到聊天里**，
   也不要把别人的 token 贴进来；这个原型只把 token 存在内存里，重启就丢。
 
 ## 换成自己的节点
@@ -312,8 +402,12 @@ encryption 密钥也没有写进任何永久文件或日志，汇报时只给前
 
 ## 未做 / 待确认
 
-- EMOS `/link` 登录跳转（`GET /link?uuid=&name=&url=`）还没接：文档没写授权完怎么把
-  token 回传给 `url`，需要用 Simon 自己的 EMOS 号实测一次。现在先用“粘贴 token”过渡。
+- EMOS `/link` 登录跳转已接好（`GET /auth/emos` → EMOS 登录 →
+  `GET /auth/emos/callback`，见“EMOS 登录”一节），但**还没用 Simon 自己的
+  EMOS 号端到端实测过**：重点确认两点，一是 EMOS 回跳到底带不带 `uuid`
+  回来（文档没写，代码里两种情况都处理了），二是 `sign/check` 的 `is_sign`
+  是“已登录”还是“今天已签到”（如果有效用户被挡，见 README 里那节的说明，
+  放宽成只看非 200）。手动粘贴 token 和演示模式仍可作为备用。
 - Token / 会话 / 分享记录只存内存：重启失效，没有数据库；生产要换成 SQLite + 落盘 + HTTPS。
 - 订阅地址现在是 `http://host/sub/...`：生产必须上 HTTPS 域名（sing-box 客户端、
   尤其是 iOS，要求订阅走 HTTPS），并配反代；**反代必须原样透传 User-Agent**，
@@ -324,9 +418,12 @@ encryption 密钥也没有写进任何永久文件或日志，汇报时只给前
 
 ## 接口一览
 
-- `GET /` 控制台页面
-- `POST /api/auth` `{token}` 或 `{carrot}` → `{ok, gated, carrot, session, sub_token, sub_url, sub_urls, share, import_url}`
-- `GET /api/nodes` 头 `X-Session: <session>` → 节点 + 探针总流量
+- `GET /` 控制台页面（主登录是“用 EMOS 账号登录”，备用是手动粘贴 token / 演示；回跳错误 `?emos_error=` 会在页面上显示中文提示）
+- `GET /auth/emos` → 302 跳到 EMOS `/link?uuid=…&name=emos-sub&url=…` 登录
+- `GET /auth/emos/callback` → EMOS 登录回跳：验 token（sign/check + carrot），放行则发 HttpOnly 会话 cookie 并 302 回 `/`；失败则 302 回 `/?emos_error=…`
+- `GET /api/auth/emos/login-url` → `{login_url}`（当前请求的登录跳转地址，调试用）
+- `POST /api/auth` `{token}` 或 `{carrot}` → `{ok, gated, carrot, session, sub_token, sub_url, sub_urls, share, import_url}`（备用登录）
+- `GET /api/nodes` 头 `X-Session: <session>` 或回调发的 HttpOnly cookie → 节点 + 探针总流量
 - `GET /api/sub-link` 头 `X-Session` → `{sub_url, sub_urls, import_url, share}`
 - `POST /api/sub/refresh` 头 `X-Session` → 轮换分享 token，旧 token 立即失效
 - `POST /api/sub/disable` 头 `X-Session` → 停用分享，重新登录才能恢复

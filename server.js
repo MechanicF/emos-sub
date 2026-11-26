@@ -151,7 +151,11 @@ function baseUrl(req) {
   return proto + '://' + req.headers.host;
 }
 function getSession(req) {
-  const sid = req.headers['x-session'];
+  // Session id comes from the X-Session header (manual token / demo login)
+  // or from the HttpOnly emos_session cookie set by the /link callback.
+  // parseCookies is defined below (admin section) but hoisted, so usable here.
+  let sid = req.headers['x-session'];
+  if (typeof sid !== 'string' || !sid) sid = parseCookies(req).emos_session;
   if (!sid || typeof sid !== 'string') return null;
   const s = sessions.get(sid);
   if (!s) return null;
@@ -821,6 +825,84 @@ async function emosCheck(token) {
   return { carrot, user_id: userId, username };
 }
 
+// --- EMOS /link 登录跳转回调 ----------------------------------------------
+// Primary login (verified reference: somebyteorg/emos_music, a real EMOS client).
+// The login button does NOT use a popup: it does
+//   window.location.href = getEmosLoginUrl(window.location.origin)
+// where getEmosLoginUrl builds:
+//   GET {EMOS_ORIGIN}/link?uuid=<crypto.randomUUID()>&name=<app name>&url=<callback URL>
+// After the user logs in on EMOS, EMOS redirects the browser to the callback
+// URL carrying a token in the URL. The app must extract and persist that
+// token, then verify it server-side. The emos-api Postman file for link登录跳转
+// confirms the exact shape (GET {{url}}/link?uuid={{$randomUUID}}&name=测试登录
+// &url=https://emos-link.local) but has NO response example, so whether EMOS
+// echoes uuid back in the callback is UNVERIFIED — the callback below accepts
+// a callback without uuid, but rejects a uuid that does not match a pending
+// login (bad_state). The token itself is always verified server-side via
+// /api/sign/check + /api/carrot/current, so a forged callback cannot log in.
+// Callback URL base: env PUBLIC_URL if set (e.g. https://sub.example.com),
+// otherwise the request Host header (x-forwarded-proto or socket.encrypted
+// decides http/https). The callback must be reachable by the USER's browser,
+// not by EMOS's server — so http://127.0.0.1:3000 works when testing on the
+// same machine, but a remote user needs the public domain (see README).
+// Note: a token can only arrive in the callback QUERY string — a server
+// cannot see a URL #hash, so if EMOS ever puts the token in the hash the
+// callback would see no_token; document that if it happens.
+const EMOS_APP_NAME = process.env.EMOS_APP_NAME || 'emos-sub';
+const PUBLIC_URL = (process.env.PUBLIC_URL || '').replace(/\/+$/, '');
+const EMOS_LOGIN_TTL_MS = 10 * 60 * 1000;
+const pendingEmosLogins = new Map(); // uuid -> {createdAt}; consume-once, 10 min
+function publicBaseUrl(req) {
+  if (PUBLIC_URL) return PUBLIC_URL;
+  const proto = req.headers['x-forwarded-proto'] || (req.socket && req.socket.encrypted ? 'https' : 'http');
+  return proto + '://' + req.headers.host;
+}
+function prunePendingEmosLogins() {
+  const now = Date.now();
+  for (const [k, v] of pendingEmosLogins) {
+    if (now - v.createdAt > EMOS_LOGIN_TTL_MS) pendingEmosLogins.delete(k);
+  }
+}
+function buildEmosLoginUrl(req) {
+  prunePendingEmosLogins();
+  const uuid = crypto.randomUUID();
+  pendingEmosLogins.set(uuid, { createdAt: Date.now() });
+  const callback = publicBaseUrl(req) + '/auth/emos/callback';
+  const login_url = EMOS_BASE + '/link?uuid=' + encodeURIComponent(uuid)
+    + '&name=' + encodeURIComponent(EMOS_APP_NAME)
+    + '&url=' + encodeURIComponent(callback);
+  return { login_url, uuid, callback };
+}
+// Strict sign-in check for the callback: sign/check only returns
+// {is_sign, user_id} — it does NOT return a token, so this only proves the
+// token EMOS gave us is a live login. Non-200 or is_sign !== true -> reject.
+// Caveat: if EMOS's is_sign means "signed in TODAY" rather than "logged in",
+// a valid user who has not signed in today would be rejected here; the
+// error page tells them to sign in on EMOS first. If Simon finds valid
+// users blocked, relax this to "non-200 only" (see README).
+async function emosSignCheck(token) {
+  const r = await fetch(EMOS_BASE + '/api/sign/check', {
+    headers: { Authorization: 'Bearer ' + token, Accept: 'application/json' },
+    signal: AbortSignal.timeout(10000),
+  });
+  if (!r.ok) throw new Error('sign/check HTTP ' + r.status);
+  const j = await r.json().catch(() => ({}));
+  if (j.is_sign !== true) throw new Error('sign/check is_sign is not true');
+  return { user_id: j.user_id || 'unknown' };
+}
+// Issue a user session + per-user share after a successful EMOS check.
+// Shared by POST /api/auth (manual token / demo) and the /link callback —
+// do not duplicate this logic. Never logs or renders the EMOS token.
+function issueUserSession(req, result, token, demo) {
+  const sessionId = randHex(16);
+  const now = Date.now();
+  const share = createShare(sessionId, result.user_id);
+  const subToken = share.token;
+  sessions.set(sessionId, { user_id: result.user_id, username: result.username, carrot: result.carrot, emosToken: token || null, demo, expiresAt: now + SESSION_TTL_MS, lastCarrotCheck: now, shareToken: subToken });
+  const urls = subUrls(req, subToken);
+  return { sessionId, share, subToken, sub_url: baseUrl(req) + '/sub/' + subToken, sub_urls: urls, import_url: urls.import_url };
+}
+
 // --- handlers ------------------------------------------------------------
 async function handleAuth(req, res) {
   let body;
@@ -844,14 +926,70 @@ async function handleAuth(req, res) {
   if (!(carrot > CARROT_THRESHOLD)) {
     return sendJson(res, 200, { ok: false, gated: false, user_id: result.user_id, username: result.username, carrot, threshold: CARROT_THRESHOLD, shortfall: CARROT_THRESHOLD + 1 - carrot, reason: 'carrot<=500' });
   }
-  const sessionId = randHex(16);
-  const now = Date.now();
-  const share = createShare(sessionId, result.user_id);
-  const subToken = share.token;
-  sessions.set(sessionId, { user_id: result.user_id, username: result.username, carrot, emosToken: token || null, demo, expiresAt: now + SESSION_TTL_MS, lastCarrotCheck: now, shareToken: subToken });
-  const subUrl = baseUrl(req) + '/sub/' + subToken;
-  const urls = subUrls(req, subToken);
+  const issued = issueUserSession(req, result, token, demo);
+  const sessionId = issued.sessionId;
+  const share = issued.share;
+  const subToken = issued.subToken;
+  const subUrl = issued.sub_url;
+  const urls = issued.sub_urls;
   return sendJson(res, 200, { ok: true, gated: true, user_id: result.user_id, username: result.username, carrot, threshold: CARROT_THRESHOLD, demo, session: sessionId, sub_token: subToken, sub_url: subUrl, sub_urls: urls, import_url: urls.import_url, share: shareInfo(share), expires_in_seconds: Math.floor(SESSION_TTL_MS / 1000) });
+}
+
+// GET /auth/emos — start EMOS /link login: issue a one-time uuid, then
+// 302 the browser to EMOS. No popup, plain top-level navigation, exactly
+// like the emos_music reference client.
+function handleEmosLogin(req, res) {
+  const { login_url } = buildEmosLoginUrl(req);
+  res.writeHead(302, { Location: login_url, 'Cache-Control': 'no-store' });
+  return res.end();
+}
+// GET /api/auth/emos/login-url — same URL as JSON (testing / debugging).
+function handleEmosLoginUrl(req, res) {
+  const { login_url, callback } = buildEmosLoginUrl(req);
+  return sendJson(res, 200, { ok: true, login_url, callback, app_name: EMOS_APP_NAME });
+}
+// GET /auth/emos/callback — EMOS redirects the browser here after login,
+// carrying the token in the query string (?token=, ?access_token= accepted
+// as a fallback alias; ?token= wins). Server-side verification, then the
+// same session + share as POST /api/auth, an HttpOnly session cookie, and a
+// 302 to / with a clean URL. The EMOS token is never put in the redirect
+// Location, never rendered in a page, and never logged — it lives only in
+// the in-memory session, same as the manual-token flow.
+async function handleEmosCallback(req, res) {
+  const u = new URL(req.url, 'http://localhost');
+  const token = (u.searchParams.get('token') || u.searchParams.get('access_token') || '').trim();
+  const uuid = u.searchParams.get('uuid') || '';
+  const fail = (code, carrot) => {
+    let loc = '/?emos_error=' + code;
+    if (typeof carrot === 'number') loc += '&carrot=' + carrot;
+    res.writeHead(302, { Location: loc, 'Cache-Control': 'no-store' });
+    res.end();
+  };
+  if (!token) return fail('no_token');
+  if (uuid) {
+    // EMOS echoed our uuid back: it must match a pending login, else reject.
+    const p = pendingEmosLogins.get(uuid);
+    if (!p || Date.now() - p.createdAt > EMOS_LOGIN_TTL_MS) return fail('bad_state');
+    pendingEmosLogins.delete(uuid); // consume-once
+  }
+  // No uuid in the callback: EMOS did not echo it (unverified behaviour —
+  // the Postman file has no response example). Accept it anyway; the token
+  // itself is verified server-side below, so a forged callback cannot log in.
+  let sign;
+  try { sign = await emosSignCheck(token); }
+  catch (e) { return fail('not_signed_in'); }
+  let result;
+  try { result = await emosCheck(token); }
+  catch (e) { return fail('not_signed_in'); }
+  if (sign.user_id && sign.user_id !== 'unknown') result.user_id = sign.user_id;
+  if (!(result.carrot > CARROT_THRESHOLD)) return fail('carrot_insufficient', result.carrot);
+  const issued = issueUserSession(req, result, token, false);
+  res.writeHead(302, {
+    Location: '/',
+    'Set-Cookie': 'emos_session=' + issued.sessionId + '; HttpOnly; Path=/; Max-Age=86400; SameSite=Lax',
+    'Cache-Control': 'no-store',
+  });
+  return res.end();
 }
 
 async function handleNodes(req, res) {
@@ -1236,6 +1374,10 @@ const HTML = '<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><met
   + '</style></head><body><div class="wrap"><h1>EMOS 订阅控制台 <span class="muted">· 原型</span></h1>'
   + '<p class="muted">EMOS 登录 → 萝卜 &gt; 500 才能进控制台。节点流量是探针里的整台服务器流量（不是单条节点、不是每人用量）。</p>'
   + '<div class="card" id="loginCard"><h2>登录</h2>'
+  + '<p><a href="/auth/emos"><button style="font-size:16px;padding:12px 20px">用 EMOS 账号登录</button></a></p>'
+  + '<p class="muted">点上面会跳到 EMOS（emos.best）登录，登录完自动跳回来，全程不用复制 token。第一次用建议走这里。</p>'
+  + '<hr style="border-color:#2a3342">'
+  + '<p class="muted">备用：手动粘贴 token / 演示（本地测试、或 /link 跳转出问题时用）</p>'
   + '<label class="muted">EMOS Bearer Token（真实模式）</label><input id="token" type="password" placeholder="粘贴 EMOS token（只发给本服务器，不会保存到聊天记录）" autocomplete="off">'
   + '<button id="btnToken">用 EMOS Token 登录</button>'
   + '<p class="muted">或演示模式：直接填萝卜数，不调 EMOS。</p>'
@@ -1263,7 +1405,7 @@ const HTML = '<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><met
   + 'function showMsg(t){document.getElementById("loginMsg").textContent=t}'
   + 'function setShareInfo(sh){if(!sh)return;document.getElementById("shareInfo").textContent="订阅链接：创建于 "+new Date(sh.created_at).toLocaleString()+(sh.expires_at?"，到期 "+new Date(sh.expires_at).toLocaleString():"，永不过期")+"，已访问 "+(sh.access_count||0)+" 次"+(sh.last_access_at?"，上次访问 "+new Date(sh.last_access_at).toLocaleString():"")}'
   + 'async function doAuth(body){showMsg("核验中…");var r=await fetch("/api/auth",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});var j=await r.json();if(!j.ok){if(j.reason==="carrot<=500"){document.getElementById("gatedCard").classList.remove("hidden");document.getElementById("dash").classList.add("hidden");document.getElementById("gatedMsg").innerHTML="萝卜：<b>"+j.carrot+"</b>，还差 <b class=\\"bad\\">"+j.shortfall+"</b> 才到 501（&gt; 500）。";showMsg("未达标：萝卜 "+j.carrot+"，还差 "+j.shortfall+"。")}else{showMsg("登录失败：" + (j.error||"未知错误"))}return} session=j.session;subUrls=j.sub_urls||{singbox:j.sub_url,clash:j.sub_url,links:j.sub_url};importUrl=j.import_url;document.getElementById("gatedCard").classList.add("hidden");document.getElementById("dash").classList.remove("hidden");document.getElementById("who").textContent=j.user_id+(j.username?" ("+j.username+")":"");document.getElementById("carrotOut").textContent=j.carrot;document.getElementById("demoBadge").textContent=j.demo?"（演示模式）":"";document.getElementById("subSingbox").textContent=subUrls.singbox;document.getElementById("subClash").textContent=subUrls.clash;document.getElementById("subSurge").textContent=subUrls.surge||subUrls.c_surge||"";document.getElementById("subLinks").textContent=subUrls.links;setShareInfo(j.share);showMsg("已登录，萝卜 "+j.carrot+"。");loadNodes()}'
-  + 'async function loadNodes(){if(!session)return;var r=await fetch("/api/nodes",{headers:{"X-Session":session}});var j=await r.json();if(!j.ok){showMsg("拉取节点失败：" + (j.error||""));return} document.getElementById("probeNote").textContent="来源：" + j.probe_source + " · " + j.traffic_note;var html="";j.nodes.forEach(function(n){var pct=n.pct_used==null?"—":n.pct_used+"%";var bar=n.pct_used==null?"": "<div class=\\"bar\\"><i style=\\"width:"+Math.min(100,n.pct_used)+"%\\"></i></div>";var up=n.uptime==null?"—":Math.floor(n.uptime/86400)+" 天";html+="<tr><td><b>"+esc(n.name)+"</b><br><span class=\\"muted\\">"+esc(n.region)+" · 探针："+esc(n.probe_name)+" #"+n.probe_node_id+"</span></td><td><span class=\\"dot"+(n.online===true?"":" off")+"\\"></span> "+(n.online===true?"在线":n.online===false?"离线":"未知（不在探针里）")+"<br><span class=\\"muted\\">↑ "+fmtSpeed(n.net_tx)+" ↓ "+fmtSpeed(n.net_rx)+"</span></td><td>"+fmt(n.day_used)+"</td><td>"+fmt(n.month_used)+" / "+(n.traffic_limit?fmt(n.traffic_limit):"不限")+"<br><span class=\\"muted\\">已用 "+pct+" · 剩余 "+(n.remaining==null?"—":fmt(n.remaining))+"</span>"+bar+"</td><td>"+(n.cpu==null?"—":n.cpu.toFixed(1)+"%")+"<br><span class=\\"muted\\">"+up+"</span></td></tr>"});document.getElementById("nodeRows").innerHTML=html||"<tr><td colspan=\\"5\\">暂无节点</td></tr>"}'
+  + 'async function loadNodes(){var r=await fetch("/api/nodes",{credentials:"include",headers:session?{"X-Session":session}:{}});var j=await r.json();if(!j.ok){showMsg("拉取节点失败：" + (j.error||""));return} document.getElementById("probeNote").textContent="来源：" + j.probe_source + " · " + j.traffic_note;var html="";j.nodes.forEach(function(n){var pct=n.pct_used==null?"—":n.pct_used+"%";var bar=n.pct_used==null?"": "<div class=\\"bar\\"><i style=\\"width:"+Math.min(100,n.pct_used)+"%\\"></i></div>";var up=n.uptime==null?"—":Math.floor(n.uptime/86400)+" 天";html+="<tr><td><b>"+esc(n.name)+"</b><br><span class=\\"muted\\">"+esc(n.region)+" · 探针："+esc(n.probe_name)+" #"+n.probe_node_id+"</span></td><td><span class=\\"dot"+(n.online===true?"":" off")+"\\"></span> "+(n.online===true?"在线":n.online===false?"离线":"未知（不在探针里）")+"<br><span class=\\"muted\\">↑ "+fmtSpeed(n.net_tx)+" ↓ "+fmtSpeed(n.net_rx)+"</span></td><td>"+fmt(n.day_used)+"</td><td>"+fmt(n.month_used)+" / "+(n.traffic_limit?fmt(n.traffic_limit):"不限")+"<br><span class=\\"muted\\">已用 "+pct+" · 剩余 "+(n.remaining==null?"—":fmt(n.remaining))+"</span>"+bar+"</td><td>"+(n.cpu==null?"—":n.cpu.toFixed(1)+"%")+"<br><span class=\\"muted\\">"+up+"</span></td></tr>"});document.getElementById("nodeRows").innerHTML=html||"<tr><td colspan=\\"5\\">暂无节点</td></tr>"}'
   + 'document.getElementById("btnToken").onclick=function(){var t=document.getElementById("token").value.trim();if(!t){showMsg("先粘贴 EMOS token");return}doAuth({token:t})};'
   + 'document.getElementById("btnDemo").onclick=function(){doAuth({carrot:Number(document.getElementById("demoCarrot").value)})};'
   + 'document.getElementById("btnDemo600").onclick=function(){document.getElementById("demoCarrot").value=600;doAuth({carrot:600})};'
@@ -1271,12 +1413,15 @@ const HTML = '<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><met
   + 'document.getElementById("btnCopySingbox").onclick=function(){if(subUrls)copyText(subUrls.singbox,"已复制 sing-box 订阅链接。")};'
   + 'document.getElementById("btnCopyClash").onclick=function(){if(subUrls)copyText(subUrls.clash,"已复制 Clash 订阅链接。")};'
   + 'document.getElementById("btnCopySurge").onclick=function(){if(subUrls)copyText(subUrls.surge||subUrls.c_surge||"","已复制 Surge 订阅链接。")};'
-  + 'document.getElementById("btnRotate").onclick=async function(){if(!session)return;var r=await fetch("/api/sub/refresh",{method:"POST",headers:{"X-Session":session}});var j=await r.json();if(!j.ok){showMsg("刷新失败：" + (j.error||""));return}subUrls=j.sub_urls;importUrl=j.import_url;document.getElementById("subSingbox").textContent=subUrls.singbox;document.getElementById("subClash").textContent=subUrls.clash;document.getElementById("subSurge").textContent=subUrls.surge||subUrls.c_surge||"";document.getElementById("subLinks").textContent=subUrls.links;setShareInfo(j.share);document.getElementById("copyMsg").textContent="已生成新订阅链接，旧链接立即失效，请重新导入。"};'
-  + 'document.getElementById("btnDisable").onclick=async function(){if(!session)return;if(!confirm("停用后订阅链接立即失效，重新登录才能恢复，确定？"))return;var r=await fetch("/api/sub/disable",{method:"POST",headers:{"X-Session":session}});var j=await r.json();if(j.ok){setShareInfo(j.share);document.getElementById("copyMsg").textContent="订阅链接已停用。"}};'
+  + 'document.getElementById("btnRotate").onclick=async function(){var r=await fetch("/api/sub/refresh",{method:"POST",credentials:"include",headers:session?{"X-Session":session}:{}});var j=await r.json();if(!j.ok){showMsg("刷新失败：" + (j.error||""));return}subUrls=j.sub_urls;importUrl=j.import_url;document.getElementById("subSingbox").textContent=subUrls.singbox;document.getElementById("subClash").textContent=subUrls.clash;document.getElementById("subSurge").textContent=subUrls.surge||subUrls.c_surge||"";document.getElementById("subLinks").textContent=subUrls.links;setShareInfo(j.share);document.getElementById("copyMsg").textContent="已生成新订阅链接，旧链接立即失效，请重新导入。"};'
+  + 'document.getElementById("btnDisable").onclick=async function(){if(!confirm("停用后订阅链接立即失效，重新登录才能恢复，确定？"))return;var r=await fetch("/api/sub/disable",{method:"POST",credentials:"include",headers:session?{"X-Session":session}:{}});var j=await r.json();if(j.ok){setShareInfo(j.share);document.getElementById("copyMsg").textContent="订阅链接已停用。"}};'
   + 'document.getElementById("btnCopyLinks").onclick=function(){if(subUrls)copyText(subUrls.links,"已复制通用 hy2 订阅链接。")};'
   + 'document.getElementById("btnImport").onclick=function(){if(importUrl)window.location.href=importUrl};'
   + 'document.getElementById("btnRefresh").onclick=function(){loadNodes()};'
-  + 'setInterval(function(){if(session)loadNodes()},30000);'
+  + '(function(){var q=new URLSearchParams(location.search);var e=q.get("emos_error");if(!e)return;var c=q.get("carrot");var m={no_token:"EMOS 回跳里没有带 token，请重新点“用 EMOS 账号登录”再试一次。",bad_state:"登录状态不对（uuid 不匹配或已过期），请重新点“用 EMOS 账号登录”。",not_signed_in:"EMOS 未确认这次登录（sign/check 未通过：可能是 token 无效，或今天还没在 EMOS 签到），请在 EMOS 登录/签到后再试。",carrot_insufficient:"萝卜不够：当前 "+(c||"?")+"，还差 "+(c?Math.max(0,501-c):"?")+" 才到 501（> 500）。"};showMsg(m[e]||("登录失败："+e));history.replaceState(null,"",location.pathname);})();'
+  + 'async function tryResume(){try{var r=await fetch("/api/nodes",{credentials:"include"});if(!r.ok)return;var j=await r.json();if(!j.ok)return;var r2=await fetch("/api/sub-link",{credentials:"include"});var j2=await r2.json();if(!j2.ok)return;subUrls=j2.sub_urls||{singbox:j2.sub_url,clash:j2.sub_url,links:j2.sub_url};importUrl=j2.import_url;document.getElementById("gatedCard").classList.add("hidden");document.getElementById("dash").classList.remove("hidden");document.getElementById("who").textContent=j.user_id;document.getElementById("carrotOut").textContent=j.carrot;document.getElementById("demoBadge").textContent=j.demo?"（演示模式）":"";document.getElementById("subSingbox").textContent=subUrls.singbox;document.getElementById("subClash").textContent=subUrls.clash;document.getElementById("subSurge").textContent=subUrls.surge||subUrls.c_surge||"";document.getElementById("subLinks").textContent=subUrls.links;setShareInfo(j2.share);showMsg("已登录，萝卜 "+j.carrot+"。");loadNodes();}catch(e){}}'
+  + 'tryResume();'
+  + 'setInterval(function(){if(!document.getElementById("dash").classList.contains("hidden"))loadNodes()},30000);'
   + '</script></body></html>';
 
 const server = http.createServer(async (req, res) => {
@@ -1292,6 +1437,9 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && u.pathname === '/api/admin/logout') return handleAdminLogout(req, res);
     if (u.pathname.startsWith('/api/admin/')) return handleAdminApi(req, res);
     if (req.method === 'POST' && u.pathname === '/api/auth') return handleAuth(req, res);
+    if (req.method === 'GET' && u.pathname === '/auth/emos') return handleEmosLogin(req, res);
+    if (req.method === 'GET' && u.pathname === '/auth/emos/callback') return handleEmosCallback(req, res);
+    if (req.method === 'GET' && u.pathname === '/api/auth/emos/login-url') return handleEmosLoginUrl(req, res);
     if (req.method === 'GET' && u.pathname === '/api/nodes') return handleNodes(req, res);
     if (req.method === 'GET' && u.pathname === '/api/sub-link') return handleSubLink(req, res);
     if (req.method === 'POST' && u.pathname === '/api/sub/refresh') return handleSubRefresh(req, res);
