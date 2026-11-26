@@ -138,6 +138,11 @@ const srv = spawnServer(REPO, PORT, {});
     if (consoleHtml.includes('CPU / 运行') || consoleHtml.includes('状态 / 实时') || consoleHtml.includes('fmtSpeed')) {
       fail('console table still shows CPU/uptime/realtime');
     } else ok('console table has no CPU/uptime/realtime columns');
+    // Console hides the per-node description and probe mapping entirely
+    // (admin still shows them — only the user-facing console drops them).
+    if (consoleHtml.includes('探针：') || consoleHtml.includes('probeNote') || consoleHtml.includes('节点 · 总流量（探针）')) {
+      fail('console still shows node descriptions or probe mapping');
+    } else ok('console shows no node description or probe mapping');
     // /api/nodes exposes expires_at (null for demo nodes without one).
     const nodesRes = JSON.parse((await reqRaw(PORT, 'GET', '/api/nodes', { 'X-Session': auth.session })).body);
     if (!nodesRes.ok || !Array.isArray(nodesRes.nodes) || !nodesRes.nodes.every((n) => 'expires_at' in n)) {
