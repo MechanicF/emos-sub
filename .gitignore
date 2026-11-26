@@ -2,3 +2,4 @@ config/nodes.json.bak
 *.bak
 .env
 node_modules/
+config/state.json

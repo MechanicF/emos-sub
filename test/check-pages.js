@@ -8,7 +8,9 @@
 // pure helpers, a mock-EMOS server that proves a dropped carrot revokes the
 // subscription immediately (no free re-check window), admin-login rate
 // limiting, and crash-resistance (bad cookie / bad template must not kill
-// the process).
+// the process). And v1.5.0: sessions/shares/admin sessions persist to
+// config/state.json across restarts, so an update no longer invalidates
+// every subscription link.
 const { spawn } = require('child_process');
 const http = require('http');
 const fs = require('fs');
@@ -18,6 +20,10 @@ const { execFileSync } = require('child_process');
 
 const REPO = path.join(__dirname, '..');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// All spawned servers get their own throwaway state file: without this, the
+// demo logins in the main-server tests would write the REAL config/state.json.
+const STATE_TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'emos-state-'));
+const stateFile = (name) => path.join(STATE_TMP, name + '.json');
 
 // ---- unit tests on the pure helpers (no server started) -------------------
 const lib = require('../server.js');
@@ -72,9 +78,16 @@ async function waitUp(port) {
   }
   throw new Error('server on ' + port + ' did not come up');
 }
+async function waitDown(port) {
+  for (let i = 0; i < 25; i++) {
+    try { await get(port, '/health'); } catch (e) { return; }
+    await sleep(200);
+  }
+  throw new Error('server on ' + port + ' did not stop');
+}
 
 const PORT = 3109;
-const srv = spawnServer(REPO, PORT, {});
+const srv = spawnServer(REPO, PORT, { EMOS_STATE_FILE: stateFile('main') });
 (async () => {
   let code = 0;
   const fail = (m) => { console.error('FAIL ' + m); code = 1; };
@@ -186,7 +199,7 @@ const srv = spawnServer(REPO, PORT, {});
   fs.cpSync(REPO, copyDir, { recursive: true, filter: (s) => !s.includes(`${path.sep}.git`) });
   const CPORT = 3110;
   try {
-    const csrv = spawnServer(copyDir, CPORT, { ADMIN_LOGIN_MAX_FAILS: '5', ADMIN_LOGIN_LOCK_MS: '2000' });
+    const csrv = spawnServer(copyDir, CPORT, { ADMIN_LOGIN_MAX_FAILS: '5', ADMIN_LOGIN_LOCK_MS: '2000', EMOS_STATE_FILE: stateFile('copy') });
     await waitUp(CPORT);
     const cauth = await postJson(CPORT, '/api/auth', { carrot: 600 });
     if (!cauth.ok) throw new Error('copy server demo login failed');
@@ -231,7 +244,7 @@ const srv = spawnServer(REPO, PORT, {});
     // Broken sing-box template: 500 JSON, server stays alive (used to crash).
     const tpl = path.join(copyDir, 'config', 'templates', 'singbox.json');
     fs.writeFileSync(tpl, fs.readFileSync(tpl, 'utf8').replace('{{OUTBOUNDS}}', '{{OUTBOUNDS}'));
-    const csrv2 = spawnServer(copyDir, CPORT, {});
+    const csrv2 = spawnServer(copyDir, CPORT, { EMOS_STATE_FILE: stateFile('copy2') });
     await waitUp(CPORT);
     const authB = await postJson(CPORT, '/api/auth', { carrot: 600 });
     const badSb = await reqRaw(CPORT, 'GET', '/c/?token=' + encodeURIComponent(authB.sub_token) + '&client=sing-box');
@@ -258,7 +271,7 @@ const srv = spawnServer(REPO, PORT, {});
   await new Promise((r) => mockEmos.listen(3111, '127.0.0.1', r));
   const GPORT = 3112;
   try {
-    const gsrv = spawnServer(REPO, GPORT, { EMOS_BASE: 'http://127.0.0.1:3111', CARROT_RECHECK_MS: '5000', DEMO_ENABLED: '' });
+    const gsrv = spawnServer(REPO, GPORT, { EMOS_BASE: 'http://127.0.0.1:3111', CARROT_RECHECK_MS: '5000', DEMO_ENABLED: '', EMOS_STATE_FILE: stateFile('gate') });
     await waitUp(GPORT);
     const login = await postJson(GPORT, '/api/auth', { token: 'fake-emos-token' });
     if (!login.ok) throw new Error('mock EMOS login failed: ' + JSON.stringify(login));
@@ -290,5 +303,49 @@ const srv = spawnServer(REPO, PORT, {});
     gsrv.kill();
   } catch (e) { console.error('FAIL mock-EMOS tests:', e.message); code = 1; }
   mockEmos.close();
+
+  // ---- restart persistence: sessions/shares survive a restart (v1.5.0) ----
+  // Before this, sessions + shares lived only in memory: every manage.sh
+  // update (which restarts the service) invalidated every subscription link.
+  const RPORT = 3113;
+  const rstate = stateFile('restart');
+  try {
+    const rsrv = spawnServer(REPO, RPORT, { EMOS_STATE_FILE: rstate });
+    await waitUp(RPORT);
+    const rlogin = await postJson(RPORT, '/api/auth', { carrot: 600 });
+    if (!rlogin.ok) throw new Error('restart-test login failed');
+    const subBefore = await reqRaw(RPORT, 'GET', '/c/?token=' + encodeURIComponent(rlogin.sub_token), { 'User-Agent': 'sing-box/1.12.0' });
+    if (subBefore.status !== 200) throw new Error('subscription did not work before restart: ' + subBefore.status);
+    const nodesBefore = await reqRaw(RPORT, 'GET', '/api/nodes', { 'X-Session': rlogin.session });
+    if (nodesBefore.status !== 200) throw new Error('session did not work before restart: ' + nodesBefore.status);
+    const adminLogin = await reqRaw(RPORT, 'POST', '/api/admin/login', {}, { token: 'test-token' });
+    if (adminLogin.status !== 200) throw new Error('restart-test admin login failed');
+    const adminCookie = adminLogin.headers['set-cookie'][0].split(';')[0];
+    // The state file holds live EMOS tokens: it must be owner-only and must
+    // never reach the public repo.
+    const st = fs.statSync(rstate);
+    if ((st.mode & 0o777) !== 0o600) fail('state file is not 0600, got ' + (st.mode & 0o777).toString(8));
+    else ok('state file written with 0600 permissions');
+    try {
+      execFileSync('git', ['check-ignore', '-q', 'config/state.json'], { cwd: REPO });
+      ok('config/state.json is git-ignored (tokens never reach the public repo)');
+    } catch (e) { fail('config/state.json is NOT git-ignored — EMOS tokens could leak to GitHub'); }
+    rsrv.kill('SIGTERM');
+    await waitDown(RPORT);
+    const rsrv2 = spawnServer(REPO, RPORT, { EMOS_STATE_FILE: rstate });
+    await waitUp(RPORT);
+    const subAfter = await reqRaw(RPORT, 'GET', '/c/?token=' + encodeURIComponent(rlogin.sub_token), { 'User-Agent': 'sing-box/1.12.0' });
+    if (subAfter.status !== 200) fail('subscription token broke across restart, got ' + subAfter.status);
+    else ok('subscription token survives a restart');
+    const nodesAfter = await reqRaw(RPORT, 'GET', '/api/nodes', { 'X-Session': rlogin.session });
+    if (nodesAfter.status !== 200) fail('user session broke across restart, got ' + nodesAfter.status);
+    else ok('user session survives a restart');
+    const adminAfter = await reqRaw(RPORT, 'GET', '/api/admin/health', { Cookie: adminCookie });
+    if (adminAfter.status !== 200) fail('admin session broke across restart, got ' + adminAfter.status);
+    else ok('admin session survives a restart');
+    rsrv2.kill();
+    await waitDown(RPORT);
+  } catch (e) { console.error('FAIL restart-persistence tests:', e.message); code = 1; }
+  fs.rmSync(STATE_TMP, { recursive: true, force: true });
   process.exit(code);
 })();

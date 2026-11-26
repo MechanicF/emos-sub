@@ -1,4 +1,4 @@
-// EMOS-gated sing-box gateway v1.4.5 — zero dependencies.
+// EMOS-gated sing-box gateway v1.5.0 — zero dependencies.
 // Node >= 18 (uses global fetch). Run: node server.js  (PORT env, default 3000)
 // Scope: EMOS login -> carrot > 500 -> console (nodes + per-user sub links)
 // + NODE TOTAL traffic only, from https://1e.lol/api/nodes. NO per-user traffic.
@@ -19,7 +19,7 @@ const path = require('path');
 const crypto = require('crypto');
 
 const PORT = parseInt(process.env.PORT || '3000', 10);
-const VERSION = '1.4.5';
+const VERSION = '1.5.0';
 const CONFIG_PATH = path.join(__dirname, 'config', 'nodes.json');
 const CLASH_TEMPLATE_PATH = path.join(__dirname, 'config', 'templates', 'clash.yaml');
 const SINGBOX_TEMPLATE_PATH = path.join(__dirname, 'config', 'templates', 'singbox.json');
@@ -169,15 +169,17 @@ function adminLoginFail(ip) {
 // only on access, so a session that is never used again sat in memory
 // forever (slow memory leak + stale shares pointing at dead sessions).
 setInterval(() => {
+  let pruned = false;
   const now = Date.now();
   for (const [sid, s] of sessions) {
-    if (now > s.expiresAt) { sessions.delete(sid); if (s.shareToken) shares.delete(s.shareToken); }
+    if (now > s.expiresAt) { pruned = true; sessions.delete(sid); if (s.shareToken) shares.delete(s.shareToken); }
   }
   for (const [tok, s] of shares) {
-    if ((s.expires_at && now > s.expires_at) || !sessions.has(s.sessionId)) shares.delete(tok);
+    if ((s.expires_at && now > s.expires_at) || !sessions.has(s.sessionId)) { pruned = true; shares.delete(tok); }
   }
-  for (const [sid, s] of adminSessions) if (now > s.expiresAt) adminSessions.delete(sid);
+  for (const [sid, s] of adminSessions) if (now > s.expiresAt) { pruned = true; adminSessions.delete(sid); }
   for (const [k, v] of rateLimits) if (now > v.resetAt) rateLimits.delete(k);
+  if (pruned) saveStateNow();
   prunePendingEmosLogins();
 }, 60 * 60 * 1000).unref();
 
@@ -233,6 +235,61 @@ function getSession(req) {
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || '';
 const ADMIN_SESSION_TTL_MS = 24 * 60 * 60 * 1000;
 const adminSessions = new Map(); // adminSessionId -> {createdAt, expiresAt}
+
+// --- durable state: sessions/shares/admin sessions survive restarts -------
+// Before v1.5.0 these lived only in memory, so every manage.sh update
+// (which restarts the service) invalidated every subscription link and
+// logged every user out. Now they are persisted to config/state.json
+// (0600, git-ignored, included in manage.sh backups) and reloaded on boot.
+// The file holds live EMOS Bearer tokens: never log it, never commit it,
+// never include it in a push. Pending EMOS logins (10-min TTL) and rate
+// limit counters are deliberately NOT persisted: an interrupted login is
+// just retried, and a restart clears any admin-login lockout.
+const STATE_PATH = process.env.EMOS_STATE_FILE || path.join(__dirname, 'config', 'state.json');
+let stateDirty = false;
+function saveStateNow() {
+  try {
+    const doc = { v: 1, sessions: [...sessions.entries()], shares: [...shares.entries()], adminSessions: [...adminSessions.entries()] };
+    fs.mkdirSync(path.dirname(STATE_PATH), { recursive: true });
+    const tmp = STATE_PATH + '.tmp-' + process.pid;
+    fs.writeFileSync(tmp, JSON.stringify(doc), 'utf8');
+    fs.chmodSync(tmp, 0o600);
+    fs.renameSync(tmp, STATE_PATH);
+    fs.chmodSync(STATE_PATH, 0o600);
+    stateDirty = false;
+  } catch (e) { console.error('Failed to save state:', e.message); }
+}
+function markStateDirty() { stateDirty = true; }
+// Access counts / last-IP are informational: flush them at most every 30 s
+// instead of rewriting the file on every subscription fetch. Structural
+// changes (login, refresh, disable, revoke, logout) save immediately.
+setInterval(() => { if (stateDirty) saveStateNow(); }, 30 * 1000).unref();
+function loadState() {
+  let raw;
+  try { raw = fs.readFileSync(STATE_PATH, 'utf8'); } catch (e) { return; } // first run: no file yet
+  try {
+    const doc = JSON.parse(raw);
+    if (!doc || typeof doc !== 'object' || !Array.isArray(doc.sessions) || !Array.isArray(doc.shares) || !Array.isArray(doc.adminSessions)) throw new Error('bad shape');
+    const now = Date.now();
+    for (const [sid, s] of doc.sessions) {
+      if (typeof sid !== 'string' || !s || typeof s !== 'object' || typeof s.user_id !== 'string' || typeof s.expiresAt !== 'number' || now > s.expiresAt) continue;
+      sessions.set(sid, s);
+    }
+    for (const [tok, s] of doc.shares) {
+      if (typeof tok !== 'string' || !s || typeof s !== 'object' || typeof s.sessionId !== 'string' || !sessions.has(s.sessionId)) continue;
+      if (s.expires_at && now > s.expires_at) continue;
+      shares.set(tok, s);
+    }
+    for (const [sid, s] of doc.adminSessions) {
+      if (typeof sid !== 'string' || !s || typeof s !== 'object' || typeof s.expiresAt !== 'number' || now > s.expiresAt) continue;
+      adminSessions.set(sid, s);
+    }
+    console.log('state restored: ' + sessions.size + ' sessions, ' + shares.size + ' shares, ' + adminSessions.size + ' admin sessions');
+  } catch (e) {
+    console.error('State file unreadable, starting empty:', e.message);
+    try { fs.renameSync(STATE_PATH, STATE_PATH + '.corrupt-' + Date.now()); } catch (_) { /* leave it */ }
+  }
+}
 function parseCookies(req) {
   const out = {};
   const h = req.headers.cookie;
@@ -1084,6 +1141,7 @@ function issueUserSession(req, result, token, demo) {
   const share = createShare(sessionId, result.user_id);
   const subToken = share.token;
   sessions.set(sessionId, { user_id: result.user_id, username: result.username, carrot: result.carrot, emosToken: token || null, demo, expiresAt: now + SESSION_TTL_MS, lastCarrotCheck: now, shareToken: subToken });
+  saveStateNow();
   const urls = subUrls(req, subToken);
   return { sessionId, share, subToken, sub_url: baseUrl(req) + '/sub/' + subToken, sub_urls: urls, import_url: urls.import_url };
 }
@@ -1205,6 +1263,7 @@ function handleSubLink(req, res) {
 function handleLogout(req, res) {
   const s = getSession(req);
   if (s) { sessions.delete(s.sid); if (s.shareToken) shares.delete(s.shareToken); }
+  saveStateNow();
   res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Set-Cookie': 'emos_session=; HttpOnly; Path=/; Max-Age=0; SameSite=Lax' + cookieSecure(req) });
   return res.end(JSON.stringify({ ok: true }));
 }
@@ -1227,6 +1286,7 @@ async function handleSubRefresh(req, res) {
   if (old) { old.enabled = false; shares.delete(s.shareToken); }
   const share = createShare(s.sid, s.user_id);
   sess.shareToken = share.token;
+  saveStateNow();
   const urls = subUrls(req, share.token);
   return sendJson(res, 200, { ok: true, user_id: s.user_id, sub_token: share.token, sub_url: urls.url, sub_urls: urls, import_url: urls.import_url, share: shareInfo(share) });
 }
@@ -1238,6 +1298,7 @@ function handleSubDisable(req, res) {
   if (!s) return sendJson(res, 401, { ok: false, error: 'missing or expired X-Session — login first' });
   const share = shares.get(s.shareToken);
   if (share) share.enabled = false;
+  saveStateNow();
   return sendJson(res, 200, { ok: true, user_id: s.user_id, disabled: true, share: shareInfo(share) });
 }
 
@@ -1257,6 +1318,7 @@ async function recheckCarrot(sid, sess) {
     if (!(r.carrot > CARROT_THRESHOLD)) {
       sessions.delete(sid);
       if (sess.shareToken) shares.delete(sess.shareToken);
+      saveStateNow();
       return 'revoked';
     }
     sess.lastCarrotCheck = Date.now();
@@ -1265,6 +1327,7 @@ async function recheckCarrot(sid, sess) {
     if (/HTTP 40[13]/.test(e.message || '')) {
       sessions.delete(sid);
       if (sess.shareToken) shares.delete(sess.shareToken);
+      saveStateNow();
       return 'revoked';
     }
     console.error('Carrot re-check failed (transient, retry in 60s):', e.message);
@@ -1279,7 +1342,7 @@ async function resolveShare(req, res, token) {
   const share = getShare(token);
   if (!share) { sendJson(res, 403, { ok: false, error: 'invalid, disabled or expired subscription token' }); return null; }
   const sess = sessions.get(share.sessionId);
-  if (!sess || Date.now() > sess.expiresAt) { shares.delete(token); sendJson(res, 403, { ok: false, error: 'subscription expired' }); return null; }
+  if (!sess || Date.now() > sess.expiresAt) { shares.delete(token); saveStateNow(); sendJson(res, 403, { ok: false, error: 'subscription expired' }); return null; }
   // Re-check carrot for real EMOS sessions (cached 10 min). Demo sessions skip.
   if (sess.emosToken && Date.now() - sess.lastCarrotCheck > CARROT_RECHECK_MS) {
     const verdict = await recheckCarrot(share.sessionId, sess);
@@ -1291,6 +1354,7 @@ async function resolveShare(req, res, token) {
   share.last_ip = clientIp(req);
   share.last_user_agent = req.headers['user-agent'] || null;
   share.last_access_at = Date.now();
+  markStateDirty();
   return { share, sess };
 }
 
@@ -1372,6 +1436,7 @@ async function handleAdminLogin(req, res) {
   adminLoginFails.delete(clientIp(req));
   const sid = randHex(16);
   adminSessions.set(sid, { createdAt: Date.now(), expiresAt: Date.now() + ADMIN_SESSION_TTL_MS });
+  saveStateNow();
   res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'Set-Cookie': 'admin_session=' + sid + '; HttpOnly; Path=/; Max-Age=86400; SameSite=Lax' + cookieSecure(req) });
   // Also return the session id in the body: if the browser does not store
   // or send the HttpOnly cookie (partitioned cookies, privacy modes), the
@@ -1384,6 +1449,7 @@ function handleAdminLogout(req, res) {
   // Also drop a session presented via the X-Admin-Token header fallback.
   const h = req.headers['x-admin-token'];
   if (typeof h === 'string' && adminSessions.has(h)) adminSessions.delete(h);
+  saveStateNow();
   res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'Set-Cookie': 'admin_session=; HttpOnly; Path=/; Max-Age=0; SameSite=Lax' + cookieSecure(req) });
   return res.end(JSON.stringify({ ok: true }));
 }
@@ -1496,6 +1562,7 @@ async function handleAdminApi(req, res) {
   if (req.method === 'POST' && p === '/api/admin/shares/revoke-all') {
     const count = shares.size;
     shares.clear();
+    saveStateNow();
     return sendJson(res, 200, { ok: true, revoked: count, note: 'All subscription tokens are now invalid; users must log in again to get a new share.' });
   }
   const shareAction = p.match(/^\/api\/admin\/shares\/([^/]+)\/(refresh|enable|disable)$/);
@@ -1508,9 +1575,11 @@ async function handleAdminApi(req, res) {
       const ns = createShare(s.sessionId, s.user_id);
       const sess = sessions.get(s.sessionId);
       if (sess) sess.shareToken = ns.token;
+      saveStateNow();
       return sendJson(res, 200, { ok: true, share: adminShareInfo(ns), note: 'old token is invalid immediately' });
     }
     s.enabled = action === 'enable';
+    saveStateNow();
     return sendJson(res, 200, { ok: true, share: adminShareInfo(s) });
   }
   const shareDel = p.match(/^\/api\/admin\/shares\/([^/]+)$/);
@@ -1518,6 +1587,7 @@ async function handleAdminApi(req, res) {
     const s = findShareByRef(decodeURIComponent(shareDel[1]));
     if (!s) return sendJson(res, 404, { ok: false, error: 'share not found' });
     shares.delete(s.token);
+    saveStateNow();
     return sendJson(res, 200, { ok: true, revoked: s.id || s.token });
   }
   // ---- Settings ----
@@ -2101,6 +2171,10 @@ const server = http.createServer(async (req, res) => {
 });
 
 if (require.main === module) {
+  loadState();
+  const flushAndExit = () => { if (stateDirty) saveStateNow(); process.exit(0); };
+  process.on('SIGTERM', flushAndExit);
+  process.on('SIGINT', flushAndExit);
   server.listen(PORT, () => {
     console.log('emos-sub v' + VERSION + ' listening on http://127.0.0.1:' + PORT);
     console.log('nodes loaded: ' + NODES.map((n) => n.key + '->probe#' + n.probe_node_id).join(', '));
