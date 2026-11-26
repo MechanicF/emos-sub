@@ -1,5 +1,12 @@
+# Runtime node config holds real credentials once the admin saves nodes.
+# Track nodes.example.json instead; server.js seeds nodes.json at 0600.
+config/nodes.json
 config/nodes.json.bak
 *.bak
 .env
 node_modules/
 config/state.json
+# Backups contain .env + state.json (live EMOS tokens) and node credentials.
+backups/
+server.log
+.pid

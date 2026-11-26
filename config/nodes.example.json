@@ -1,0 +1,9 @@
+{
+  "_note": "DEMO TEMPLATE - Copy to nodes.json (server.js does this automatically on first run) and replace the links with real nodes. These placeholders (demo.invalid / DEMO-CHANGE-ME) will NOT connect. probe_node_id values are real ids from https://1e.lol/api/nodes (2026-11-26): Nuyek=2, Raksmart=22, sadcloud=20.",
+  "name_rule": "[$Flag] $LinkCountryName - $Name",
+  "nodes": [
+    { "hy2_link": "hysteria2://DEMO-CHANGE-ME@demo.invalid:443?sni=demo.invalid&obfs=salamander&obfs-password=DEMO-CHANGE-ME#US-Nuyek", "key": "hy2-us-nuyek", "name": "US · Nuyek", "probe_name": "Nuyek", "probe_node_id": 2, "region": "US" },
+    { "hy2_link": "hysteria2://DEMO-CHANGE-ME@demo.invalid:443?sni=demo.invalid&obfs=salamander&obfs-password=DEMO-CHANGE-ME#US-Raksmart", "key": "hy2-us-raksmart", "name": "US · Raksmart", "probe_name": "Raksmart", "probe_node_id": 22, "region": "US" },
+    { "hy2_link": "hysteria2://DEMO-CHANGE-ME@demo.invalid:443?sni=demo.invalid&obfs=salamander&obfs-password=DEMO-CHANGE-ME#HK-sadcloud", "key": "hy2-hk-sadcloud", "name": "HK · sadcloud", "probe_name": "sadcloud", "probe_node_id": 20, "region": "HK" }
+  ]
+}

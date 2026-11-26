@@ -68,7 +68,7 @@ write_env() { # write_env KEY VALUE：更新 .env 里一项（不存在则追加
   # .env（bash source 和 systemd EnvironmentFile 都认双引号转义）。
   # 口令最好还是只用字母数字，少折腾。
   local key="$1" val="$2" tmp esc
-  [ -f "$ENV_FILE" ] || : > "$ENV_FILE"
+  [ -f "$ENV_FILE" ] || { : > "$ENV_FILE"; chmod 600 "$ENV_FILE"; }
   tmp="$(mktemp)"
   grep -v -E "^${key}=" "$ENV_FILE" > "$tmp" 2>/dev/null || true
   esc="$(printf '%s' "$val" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/\$/\\$/g' -e 's/`/\\`/g')"
@@ -215,7 +215,7 @@ EOF
 cmd_uninstall() {
   [ -d "$INSTALL_DIR" ] || { err "没找到安装目录 $INSTALL_DIR，没什么可卸的"; return 1; }
   say "先备份配置到 /tmp/emos-sub-backup-*.tar.gz ..."
-  cmd_backup /tmp || true
+  if ! cmd_backup /tmp; then err "备份失败，已取消卸载（没有备份不删数据）"; return 1; fi
   printf '确定卸载吗？将停止服务并删除 %s（配置已备份到 /tmp）[y/N] ' "$INSTALL_DIR"
   read -r ans; case "$ans" in y|Y|yes) ;; *) say "已取消"; return 0;; esac
   do_stop || true
@@ -231,11 +231,11 @@ cmd_autostart() {
       elif has_systemd; then err "还没安装 systemd 服务，先 ./manage.sh install"; return 1
       else # 无 systemd：cron @reboot
         need crontab || return 1
-        (crontab -l 2>/dev/null | grep -v "$INSTALL_DIR/manage.sh start"; echo "@reboot $INSTALL_DIR/manage.sh start >/dev/null 2>&1") | crontab -
+        (crontab -l 2>/dev/null | grep -vF "$INSTALL_DIR/manage.sh start"; echo "@reboot $INSTALL_DIR/manage.sh start >/dev/null 2>&1") | crontab -
         say "开机自启：已开启（cron @reboot 方式）"; fi;;
     off)
       if has_systemd && [ -f "$UNIT" ]; then sudo_if_needed systemctl disable "$SERVICE" && say "开机自启：已关闭"
-      else (crontab -l 2>/dev/null | grep -v "$INSTALL_DIR/manage.sh start") | crontab - 2>/dev/null || true; say "开机自启：已关闭"; fi;;
+      else (crontab -l 2>/dev/null | grep -vF "$INSTALL_DIR/manage.sh start") | crontab - 2>/dev/null || true; say "开机自启：已关闭"; fi;;
     *) err "用法：./manage.sh autostart on|off"; return 1;; esac
 }
 cmd_port() {
@@ -262,7 +262,7 @@ cmd_update() {
   [ -f "$INSTALL_DIR/config/settings.json" ] && cp "$INSTALL_DIR/config/settings.json" "$keep/settings.json"
   # 只更新代码文件（不 pull、不 reset --hard，避免本地节点配置被冲掉；
   # 本地改过 server.js 等代码文件会被新版覆盖，改之前已备份）
-  (cd "$INSTALL_DIR" && git checkout origin/main -- server.js README.md manage.sh start.sh .gitignore config/templates test) || { err "更新代码文件失败"; rm -rf "$keep"; return 1; }
+  (cd "$INSTALL_DIR" && git checkout origin/main -- server.js README.md manage.sh start.sh .gitignore config/templates config/nodes.example.json test) || { err "更新代码文件失败"; rm -rf "$keep"; return 1; }
   [ -f "$keep/.env" ] && cp "$keep/.env" "$INSTALL_DIR/.env"
   [ -f "$keep/nodes.json" ] && cp "$keep/nodes.json" "$INSTALL_DIR/config/nodes.json"
   [ -f "$keep/settings.json" ] && cp "$keep/settings.json" "$INSTALL_DIR/config/settings.json"
@@ -274,7 +274,13 @@ cmd_update() {
 cmd_backup() {
   local dest="${1:-$INSTALL_DIR/backups}"; mkdir -p "$dest"
   local f="$dest/emos-sub-backup-$(date +%Y%m%d-%H%M%S).tar.gz"
+  # The archive contains .env, config/state.json (live EMOS tokens) and
+  # config/nodes.json (node credentials). Never create it world-readable,
+  # especially when uninstall writes it into /tmp.
+  local old_umask; old_umask="$(umask)"; umask 077
   tar -czf "$f" -C "$INSTALL_DIR" .env config 2>/dev/null || tar -czf "$f" -C "$INSTALL_DIR" .env 2>/dev/null
+  chmod 600 "$f" 2>/dev/null || true
+  umask "$old_umask"
   # 只保留最近 10 个备份，旧的自动删（以前无限攒）。
   ls -t "$dest"/emos-sub-backup-*.tar.gz 2>/dev/null | tail -n +11 | xargs -r rm -f -- 2>/dev/null || true
   say "备份完成：$f（.env + config/）"

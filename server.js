@@ -9,17 +9,23 @@
 // Protocols: hy2://, hysteria2:// and vless:// (incl. REALITY + VLESS Encryption).
 'use strict';
 const http = require('http');
-// Last-resort nets (2026-11-26 audit): the dispatcher awaits every handler,
-// so request errors are caught there. These two only guard against a bug
-// that slips past that — log loudly, keep serving, never die on one request.
-process.on('unhandledRejection', (e) => { console.error('UNHANDLED REJECTION (kept running):', e); });
-process.on('uncaughtException', (e) => { console.error('UNCAUGHT EXCEPTION (kept running):', e); });
+// Last-resort nets: the dispatcher awaits every handler, so request errors
+// are normally caught there. Surviving ONE stray error is fine; surviving
+// many means in-memory state may be corrupt. Let systemd restart us clean.
+let fatalErrCount = 0;
+function noteFatal(kind, e) {
+  fatalErrCount += 1;
+  console.error(kind + ' (kept running, ' + fatalErrCount + '/5):', e);
+  if (fatalErrCount >= 5) { console.error('too many uncaught errors, exiting for a clean restart'); process.exit(1); }
+}
+process.on('unhandledRejection', (e) => noteFatal('UNHANDLED REJECTION', e));
+process.on('uncaughtException', (e) => noteFatal('UNCAUGHT EXCEPTION', e));
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
 const PORT = parseInt(process.env.PORT || '3000', 10);
-const VERSION = '1.5.4';
+const VERSION = '1.5.5';
 const CONFIG_PATH = path.join(__dirname, 'config', 'nodes.json');
 const CLASH_TEMPLATE_PATH = path.join(__dirname, 'config', 'templates', 'clash.yaml');
 const SINGBOX_TEMPLATE_PATH = path.join(__dirname, 'config', 'templates', 'singbox.json');
@@ -27,6 +33,10 @@ const PROBE_URL = process.env.PROBE_URL || 'https://1e.lol/api/nodes';
 const EMOS_BASE = process.env.EMOS_BASE || 'https://emos.best';
 const SESSION_TTL_MS = 24 * 60 * 60 * 1000;
 const CARROT_RECHECK_MS = Math.max(1000, parseInt(process.env.CARROT_RECHECK_MS || '600000', 10) || 600000);
+// Hard cap on how long a link may be served while EMOS is unreachable.
+// Without it every failed re-check just postpones another 60 s, so a user
+// whose carrot dropped during an EMOS outage keeps a working link forever.
+const CARROT_GRACE_MS = Math.max(1000, parseInt(process.env.CARROT_GRACE_MS || String(24 * 60 * 60 * 1000), 10) || 24 * 60 * 60 * 1000);
 // Runtime settings (mutable — admin can change them without a restart).
 // Precedence at startup: env var > config/settings.json > default.
 // CARROT_THRESHOLD: strict, carrot must be > this. SHARE_TTL_HOURS: 0 = never.
@@ -43,6 +53,18 @@ const SETTINGS_SOURCES = { carrot_threshold: 'default', share_ttl_hours: 'defaul
 let NODES = [];
 let NAME_RULE = '[$Flag] $LinkCountryName - $Name';
 let NODES_NOTE = 'DEMO TEMPLATE — Replace links with real nodes.';
+// config/nodes.json is git-ignored: once the admin saves real nodes it holds
+// credentials. On a fresh clone, seed it from the tracked example at 0600.
+try {
+  if (!fs.existsSync(CONFIG_PATH)) {
+    const example = path.join(__dirname, 'config', 'nodes.example.json');
+    if (fs.existsSync(example)) {
+      fs.copyFileSync(example, CONFIG_PATH);
+      try { fs.chmodSync(CONFIG_PATH, 0o600); } catch (e) { /* Windows */ }
+      console.log('config/nodes.json seeded from nodes.example.json');
+    }
+  }
+} catch (e) { console.error('Failed to seed config/nodes.json:', e.message); }
 try {
   const raw = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
   NODES = Array.isArray(raw.nodes) ? raw.nodes : [];
@@ -230,8 +252,16 @@ function sendJson(res, code, obj) {
 function readBody(req) {
   return new Promise((resolve, reject) => {
     let data = '';
-    req.on('data', (c) => { data += c; if (data.length > 65536) { req.destroy(); reject(new Error('request body too large')); } });
+    let tooLarge = false;
+    req.on('data', (c) => {
+      if (tooLarge) return; // keep draining so the response can be written
+      data += c;
+      if (data.length > 65536) tooLarge = true;
+    });
     req.on('end', () => {
+      if (tooLarge) {
+        const e = new Error('request body too large'); e.status = 413; return reject(e);
+      }
       if (!data) return resolve({});
       try { resolve(JSON.parse(data)); } catch (e) { reject(new Error('invalid JSON')); }
     });
@@ -305,6 +335,7 @@ function loadState() {
     const now = Date.now();
     for (const [sid, s] of doc.sessions) {
       if (typeof sid !== 'string' || !s || typeof s !== 'object' || typeof s.user_id !== 'string' || typeof s.expiresAt !== 'number' || now > s.expiresAt) continue;
+      if (typeof s.lastCarrotOkAt !== 'number') s.lastCarrotOkAt = now; // pre-1.5.5 state files
       sessions.set(sid, s);
     }
     for (const [tok, s] of doc.shares) {
@@ -376,8 +407,12 @@ function findShareByRef(ref) {
 // one-generation backup (nodes.json.bak) of the previous version.
 function atomicWrite(filePath, content) {
   const tmp = filePath + '.tmp-' + process.pid;
-  fs.writeFileSync(tmp, content, 'utf8');
+  // 0600 from creation, not chmod-after-write: nodes.json can hold real
+  // node credentials. Windows ignores the mode but accepts the call.
+  fs.writeFileSync(tmp, content, { encoding: 'utf8', mode: 0o600 });
+  try { fs.chmodSync(tmp, 0o600); } catch (e) { /* Windows */ }
   fs.renameSync(tmp, filePath);
+  try { fs.chmodSync(filePath, 0o600); } catch (e) { /* Windows */ }
 }
 // Subscription bodies (clash/singbox/links/b64) depend only on NODES and
 // NAME_RULE, not on the user/token — the per-user part (Subscription-Userinfo)
@@ -397,7 +432,7 @@ function cachedSubBody(format, build) {
 
 function saveNodesConfig() {
   const prev = path.join(__dirname, 'config', 'nodes.json.bak');
-  try { fs.copyFileSync(CONFIG_PATH, prev); } catch (e) { /* first save: no previous file */ }
+  try { fs.copyFileSync(CONFIG_PATH, prev); fs.chmodSync(prev, 0o600); } catch (e) { /* first save / Windows */ }
   const doc = { _note: NODES_NOTE, name_rule: NAME_RULE, nodes: NODES };
   atomicWrite(CONFIG_PATH, JSON.stringify(doc));
   bumpSubCache();
@@ -457,6 +492,13 @@ function nodeAdminView(n, probeMap) {
   };
 }
 
+// decodeURIComponent throws URIError on a literal '%' that is not a valid
+// escape. A link with such a password/fragment must NOT silently vanish from
+// the subscription; keep the raw text instead.
+function safeDecode(s) {
+  try { return decodeURIComponent(s); } catch (e) { return s; }
+}
+
 // --- hy2:// link parsing -------------------------------------------------
 // hysteria2:// and hy2:// are both accepted (sublinkPro convention).
 // Userinfo is percent-decoded ONCE: both of these preserve the full credential
@@ -473,7 +515,7 @@ function parseHy2(link, fallbackName) {
     // Decode userinfo once. Note: URL already splits user:pass on a literal
     // colon, but leaves %3A encoded inside username — decode once recovers it.
     const rawUserinfo = u.username + (u.password ? ':' + u.password : '');
-    const password = decodeURIComponent(rawUserinfo);
+    const password = safeDecode(rawUserinfo);
     if (!password || !u.hostname) return null;
     const port = parseInt(u.port || '443', 10);
     if (!Number.isInteger(port) || port < 1 || port > 65535) return null;
@@ -485,7 +527,7 @@ function parseHy2(link, fallbackName) {
     const pinSHA256 = params.get('pinSHA256') || params.get('pin-sha256') || null;
     const ports = params.get('ports') || params.get('port-hopping') || null;
     const hopInterval = params.get('hop-interval') || params.get('hopInterval') || null;
-    const name = decodeURIComponent(u.hash ? u.hash.slice(1) : '') || fallbackName;
+    const name = safeDecode(u.hash ? u.hash.slice(1) : '') || fallbackName;
     const out = {
       type: 'hysteria2', tag: name, server: u.hostname, server_port: port,
       version: 2, password, network: 'udp',
@@ -517,7 +559,7 @@ function parseVless(link, fallbackName) {
   try {
     const u = new URL(link);
     if (u.protocol !== 'vless:') return null;
-    const uuid = decodeURIComponent(u.username);
+    const uuid = safeDecode(u.username);
     if (!uuid || !u.hostname) return null;
     const port = parseInt(u.port || '443', 10);
     if (!Number.isInteger(port) || port < 1 || port > 65535) return null;
@@ -529,7 +571,7 @@ function parseVless(link, fallbackName) {
     // any other value: leave undefined (do not guess)
     const security = (p.get('security') || 'none').toLowerCase();
     if (security === 'reality' && !p.get('pbk')) return null; // REALITY needs pbk; without it the config silently degrades to plain TLS
-    const name = decodeURIComponent(u.hash ? u.hash.slice(1) : '') || fallbackName;
+    const name = safeDecode(u.hash ? u.hash.slice(1) : '') || fallbackName;
     return {
       type: 'vless', tag: name, server: u.hostname, server_port: port,
       uuid, flow: p.get('flow') || undefined,
@@ -989,7 +1031,12 @@ function subUrls(req, token) {
 // expire = last day of the current month, 23:59:59 local time.
 function probeTotals(probeNodes) {
   let upload = 0, download = 0, total = 0;
+  const seen = new Set();
   for (const n of NODES) {
+    // Several gateway nodes may map to the same probe id: count that
+    // machine's traffic exactly once.
+    if (!n.probe_node_id || seen.has(n.probe_node_id)) continue;
+    seen.add(n.probe_node_id);
     const p = probeNodes.find((x) => x.id === n.probe_node_id);
     if (!p) continue;
     upload += p.month_tx || 0;
@@ -1017,10 +1064,11 @@ function userinfoHeader(t) {
 
 // --- probe (1e.lol) ------------------------------------------------------
 let probeCache = { at: 0, data: null, source: 'live' };
+let probeLiveData = null; // last SUCCESSFUL live payload, kept apart from the fallback cache
 // A failed fetch is cached too (with a longer TTL) so a down probe does not
 // make every request pay the full 10 s timeout. In-flight fetches are shared
 // so a burst after cache expiry triggers one upstream call, not N.
-const PROBE_FAIL_CACHE_MS = 60 * 1000;
+const PROBE_FAIL_CACHE_MS = Math.max(1000, parseInt(process.env.PROBE_FAIL_CACHE_MS || '60000', 10) || 60000);
 let probeInflight = null;
 async function fetchProbe() {
   const now = Date.now();
@@ -1033,12 +1081,16 @@ async function fetchProbe() {
       if (!r.ok) throw new Error('probe HTTP ' + r.status);
       const j = await r.json();
       if (!Array.isArray(j.nodes)) throw new Error('probe: no nodes array');
+      probeLiveData = j.nodes;
       probeCache = { at: Date.now(), data: j.nodes, source: 'live' };
     } catch (e) {
       console.error('Probe fetch failed, using labelled sample fallback:', e.message);
       // Keep any stale live data (labelled) when we have it; otherwise sample.
       // Cache the failure with at=now so the next request does not re-fetch.
-      const stale = probeCache.data;
+      // Only real live data may be labelled live-stale. Reusing
+      // probeCache.data here relabelled the SAMPLE payload as stale-live on
+      // the second failure, contradicting the "sample fallback" promise.
+      const stale = probeLiveData;
       probeCache = { at: Date.now(), data: stale || SAMPLE_PROBE, source: stale ? 'live-stale' : 'sample-fallback' };
     } finally {
       probeInflight = null;
@@ -1075,22 +1127,42 @@ function mapNodes(probeNodes) {
 }
 
 // --- EMOS ----------------------------------------------------------------
-async function emosCheck(token) {
+async function emosCheck(token, knownIdentity) {
   const headers = { Authorization: 'Bearer ' + token, Accept: 'application/json' };
-  const [carrotRes, signRes] = await Promise.all([
+  // Identity is MANDATORY: a failed sign/check must never degrade to the
+  // shared 'unknown' user, or one login revokes every other user's link.
+  const identityPromise = knownIdentity
+    ? Promise.resolve(knownIdentity)
+    : fetch(EMOS_BASE + '/api/sign/check', { headers, signal: AbortSignal.timeout(10000) })
+        .then(async (r) => {
+          if (!r.ok) throw new Error('sign/check HTTP ' + r.status);
+          const j = await r.json().catch(() => ({}));
+          if (j.is_sign !== true || !j.user_id) throw new Error('sign/check did not confirm a signed-in user');
+          return { user_id: String(j.user_id) };
+        });
+  const [carrotRes, identity] = await Promise.all([
     fetch(EMOS_BASE + '/api/carrot/current', { headers, signal: AbortSignal.timeout(10000) }),
-    fetch(EMOS_BASE + '/api/sign/check', { headers, signal: AbortSignal.timeout(10000) }).catch(() => null),
+    identityPromise,
   ]);
   if (!carrotRes.ok) throw new Error('EMOS carrot check failed: HTTP ' + carrotRes.status);
   const carrotJson = await carrotRes.json();
   const carrot = Number(carrotJson.carrot);
   if (!Number.isFinite(carrot)) throw new Error('EMOS carrot response has no numeric carrot');
-  let userId = 'unknown', username = null;
-  if (signRes && signRes.ok) {
-    const s = await signRes.json().catch(() => ({}));
-    if (s.user_id) userId = s.user_id;
-  }
-  return { carrot, user_id: userId, username };
+  const userId = identity && identity.user_id ? String(identity.user_id) : '';
+  if (!userId || userId === 'unknown') throw new Error('EMOS identity check failed: missing user_id');
+  return { carrot, user_id: userId, username: null };
+}
+// Re-checks only need the balance; identity was proven at login.
+async function emosCarrotOnly(token) {
+  const r = await fetch(EMOS_BASE + '/api/carrot/current', {
+    headers: { Authorization: 'Bearer ' + token, Accept: 'application/json' },
+    signal: AbortSignal.timeout(10000),
+  });
+  if (!r.ok) throw new Error('EMOS carrot check failed: HTTP ' + r.status);
+  const j = await r.json();
+  const carrot = Number(j.carrot);
+  if (!Number.isFinite(carrot)) throw new Error('EMOS carrot response has no numeric carrot');
+  return carrot;
 }
 
 // --- EMOS /link 登录跳转回调 ----------------------------------------------
@@ -1139,9 +1211,14 @@ function validHost(h) {
 }
 function publicBaseUrl(req) {
   if (PUBLIC_URL) return PUBLIC_URL;
-  // x-forwarded-proto may be a comma list ("https, http") — take the first.
-  const xf = (req.headers['x-forwarded-proto'] || '').split(',')[0].trim();
-  const proto = xf || (req.socket && req.socket.encrypted ? 'https' : 'http');
+  // Only http/https are valid schemes, and only from a trusted proxy peer.
+  // An unvalidated X-Forwarded-Proto used to allow arbitrary schemes
+  // (e.g. javascript:) into subscription URLs and Surge managed-config lines.
+  const xf = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim().toLowerCase();
+  const peer = req.socket && req.socket.remoteAddress;
+  const trustXf = TRUST_PROXY_MODE === '1' || TRUST_PROXY_MODE === 'true' || TRUST_PROXY_MODE === 'always'
+    || (TRUST_PROXY_MODE !== '0' && TRUST_PROXY_MODE !== 'false' && TRUST_PROXY_MODE !== 'never' && isTrustedProxyPeer(peer));
+  const proto = (trustXf && (xf === 'http' || xf === 'https')) ? xf : (req.socket && req.socket.encrypted ? 'https' : 'http');
   const host = validHost(req.headers.host) ? req.headers.host : ('127.0.0.1:' + PORT);
   return proto + '://' + host;
 }
@@ -1199,7 +1276,7 @@ function issueUserSession(req, result, token, demo) {
   const now = Date.now();
   const share = createShare(sessionId, result.user_id);
   const subToken = share.token;
-  sessions.set(sessionId, { user_id: result.user_id, username: result.username, carrot: result.carrot, emosToken: token || null, demo, expiresAt: now + SESSION_TTL_MS, lastCarrotCheck: now, shareToken: subToken });
+  sessions.set(sessionId, { user_id: result.user_id, username: result.username, carrot: result.carrot, emosToken: token || null, demo, expiresAt: now + SESSION_TTL_MS, lastCarrotCheck: now, lastCarrotOkAt: now, shareToken: subToken });
   saveStateNow();
   const urls = subUrls(req, subToken);
   return { sessionId, share, subToken, sub_url: baseUrl(req) + '/sub/' + subToken, sub_urls: urls, import_url: urls.import_url };
@@ -1211,7 +1288,7 @@ async function handleAuth(req, res) {
   // used as an EMOS-check oracle or a DDoS amplifier.
   if (!rateLimitCheck(req, res, 'auth:' + clientIp(req), 30, 10 * 60 * 1000)) return;
   let body;
-  try { body = await readBody(req); } catch (e) { return sendJson(res, 400, { ok: false, error: e.message }); }
+  try { body = await readBody(req); } catch (e) { return sendJson(res, e.status || 400, { ok: false, error: e.message }); }
   const token = typeof body.token === 'string' ? body.token.trim() : '';
   const demoCarrot = typeof body.carrot === 'number' ? body.carrot : (typeof body.carrot === 'string' && body.carrot !== '' ? Number(body.carrot) : NaN);
 
@@ -1288,9 +1365,9 @@ async function handleEmosCallback(req, res) {
   try { sign = await emosSignCheck(token); }
   catch (e) { return fail('not_signed_in'); }
   let result;
-  try { result = await emosCheck(token); }
+  // Reuse the sign/check result: 2 EMOS calls for the callback, not 3.
+  try { result = await emosCheck(token, sign); }
   catch (e) { return fail('not_signed_in'); }
-  if (sign.user_id && sign.user_id !== 'unknown') result.user_id = sign.user_id;
   if (!(result.carrot > CARROT_THRESHOLD)) return fail('carrot_insufficient', result.carrot);
   const issued = issueUserSession(req, result, token, false);
   res.writeHead(302, {
@@ -1328,7 +1405,7 @@ function handleLogout(req, res) {
   const s = getSession(req);
   if (s) { sessions.delete(s.sid); if (s.shareToken) shares.delete(s.shareToken); }
   saveStateNow();
-  res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Set-Cookie': 'emos_session=; HttpOnly; Path=/; Max-Age=0; SameSite=Lax' + cookieSecure(req) });
+  res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Set-Cookie': 'emos_session=; HttpOnly; Path=/; Max-Age=0; SameSite=Lax' + cookieSecure(req), ...securityHeaders() });
   return res.end(JSON.stringify({ ok: true }));
 }
 
@@ -1338,6 +1415,10 @@ async function handleSubRefresh(req, res) {
   if (!s) return sendJson(res, 401, { ok: false, error: 'missing or expired X-Session — login first' });
   const sess = sessions.get(s.sid);
   if (!sess) return sendJson(res, 401, { ok: false, error: 'missing or expired X-Session — login first' });
+  // A null shareToken means the link was revoked/disabled (admin revoke-all,
+  // single revoke, or the user's own disable). Only a fresh EMOS login may
+  // mint a new link; self-service refresh must not undo a revocation.
+  if (!sess.shareToken) return sendJson(res, 403, { ok: false, error: 'subscription revoked or disabled — please log in again' });
   // Rotating must not bypass the gate: an admin-disabled share, or a carrot
   // that dropped since login, must not mint a fresh link without a live
   // EMOS check. (Re-login does the same check; refresh is no cheaper.)
@@ -1360,8 +1441,10 @@ async function handleSubRefresh(req, res) {
 function handleSubDisable(req, res) {
   const s = getSession(req);
   if (!s) return sendJson(res, 401, { ok: false, error: 'missing or expired X-Session — login first' });
+  const sess = sessions.get(s.sid);
   const share = shares.get(s.shareToken);
   if (share) share.enabled = false;
+  if (sess) sess.shareToken = null; // refresh must not resurrect a disabled link
   saveStateNow();
   return sendJson(res, 200, { ok: true, user_id: s.user_id, disabled: true, share: shareInfo(share) });
 }
@@ -1377,18 +1460,27 @@ function handleSubDisable(req, res) {
 // test, so one failed re-check granted 10 more minutes of free serving.
 async function recheckCarrot(sid, sess) {
   try {
-    const r = await emosCheck(sess.emosToken);
-    sess.carrot = r.carrot;
-    if (!(r.carrot > CARROT_THRESHOLD)) {
+    const carrot = await emosCarrotOnly(sess.emosToken);
+    sess.carrot = carrot;
+    if (!(carrot > CARROT_THRESHOLD)) {
       sessions.delete(sid);
       if (sess.shareToken) shares.delete(sess.shareToken);
       saveStateNow();
       return 'revoked';
     }
     sess.lastCarrotCheck = Date.now();
+    sess.lastCarrotOkAt = Date.now();
     return 'ok';
   } catch (e) {
     if (/HTTP 40[13]/.test(e.message || '')) {
+      sessions.delete(sid);
+      if (sess.shareToken) shares.delete(sess.shareToken);
+      saveStateNow();
+      return 'revoked';
+    }
+    const lastOk = sess.lastCarrotOkAt || sess.lastCarrotCheck || 0;
+    if (Date.now() - lastOk > CARROT_GRACE_MS) {
+      console.error('Carrot grace period exceeded, revoking session');
       sessions.delete(sid);
       if (sess.shareToken) shares.delete(sess.shareToken);
       saveStateNow();
@@ -1438,7 +1530,7 @@ async function serveSubscription(req, res, token) {
   const userinfo = userinfoHeader(totals);
   // sublinkPro convention: never cache a subscription across devices;
   // reverse proxies must preserve User-Agent (that is what picks the format).
-  const commonHeaders = { 'Cache-Control': 'private, no-store', 'Subscription-Userinfo': userinfo, 'Profile-Title': 'EMOS-gated sing-box' };
+  const commonHeaders = { 'Cache-Control': 'private, no-store', 'Subscription-Userinfo': userinfo, 'Profile-Title': 'EMOS-gated sing-box', ...securityHeaders() };
 
   if (format === 'html') {
     const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
@@ -1488,7 +1580,7 @@ async function handleAdminLogin(req, res) {
   // Brute-force guard: 5 wrong guesses lock this IP for 15 min.
   if (adminLoginBlocked(clientIp(req))) return sendJson(res, 429, { ok: false, error: 'too many failed logins, try again later' });
   let body;
-  try { body = await readBody(req); } catch (e) { return sendJson(res, 400, { ok: false, error: e.message }); }
+  try { body = await readBody(req); } catch (e) { return sendJson(res, e.status || 400, { ok: false, error: e.message }); }
   // Trim: copy-paste from chat/notes often adds a trailing space or newline.
   const token = typeof body.token === 'string' ? body.token.trim() : '';
   // Compare by BUFFER byte length, not JS string length: for a multibyte
@@ -1501,7 +1593,7 @@ async function handleAdminLogin(req, res) {
   const sid = randHex(16);
   adminSessions.set(sid, { createdAt: Date.now(), expiresAt: Date.now() + ADMIN_SESSION_TTL_MS });
   saveStateNow();
-  res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'Set-Cookie': 'admin_session=' + sid + '; HttpOnly; Path=/; Max-Age=86400; SameSite=Lax' + cookieSecure(req) });
+  res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'Set-Cookie': 'admin_session=' + sid + '; HttpOnly; Path=/; Max-Age=86400; SameSite=Lax' + cookieSecure(req), ...securityHeaders() });
   // Also return the session id in the body: if the browser does not store
   // or send the HttpOnly cookie (partitioned cookies, privacy modes), the
   // page falls back to sending it as an X-Admin-Token header instead.
@@ -1514,7 +1606,7 @@ function handleAdminLogout(req, res) {
   const h = req.headers['x-admin-token'];
   if (typeof h === 'string' && adminSessions.has(h)) adminSessions.delete(h);
   saveStateNow();
-  res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'Set-Cookie': 'admin_session=; HttpOnly; Path=/; Max-Age=0; SameSite=Lax' + cookieSecure(req) });
+  res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'Set-Cookie': 'admin_session=; HttpOnly; Path=/; Max-Age=0; SameSite=Lax' + cookieSecure(req), ...securityHeaders() });
   return res.end(JSON.stringify({ ok: true }));
 }
 function handleAdminPage(req, res) {
@@ -1530,9 +1622,11 @@ async function handleAdminApi(req, res) {
   const u = new URL(req.url, 'http://localhost');
   const p = u.pathname;
   if (!requireAdmin(req, res)) return;
+  let bodyStatus = 400;
   const readJsonBody = async () => {
-    try { return await readBody(req); } catch (e) { return null; }
+    try { return await readBody(req); } catch (e) { bodyStatus = e.status || 400; return null; }
   };
+  const badBody = () => sendJson(res, bodyStatus, { ok: false, error: bodyStatus === 413 ? 'request body too large' : 'invalid JSON' });
   // ---- Nodes ----
   if (req.method === 'GET' && p === '/api/admin/nodes') {
     const probe = await fetchProbe();
@@ -1541,7 +1635,7 @@ async function handleAdminApi(req, res) {
   }
   if (req.method === 'POST' && p === '/api/admin/nodes/parse') {
     const body = await readJsonBody();
-    if (!body) return sendJson(res, 400, { ok: false, error: 'invalid JSON' });
+    if (!body) return badBody();
     const link = typeof body.link === 'string' ? body.link.trim() : '';
     if (!link) return sendJson(res, 400, { ok: false, error: 'link is required' });
     const { protocol, parsed } = parseAnyLink(link, '');
@@ -1550,7 +1644,7 @@ async function handleAdminApi(req, res) {
   }
   if (req.method === 'POST' && p === '/api/admin/nodes') {
     const body = await readJsonBody();
-    if (!body) return sendJson(res, 400, { ok: false, error: 'invalid JSON' });
+    if (!body) return badBody();
     const link = typeof body.link === 'string' ? body.link.trim() : '';
     if (!link) return sendJson(res, 400, { ok: false, error: 'link is required' });
     const { protocol, parsed } = parseAnyLink(link, '');
@@ -1590,7 +1684,7 @@ async function handleAdminApi(req, res) {
   }
   const nodeMatch = p.match(/^\/api\/admin\/nodes\/([^/]+)$/);
   if (nodeMatch && (req.method === 'PUT' || req.method === 'DELETE')) {
-    const key = decodeURIComponent(nodeMatch[1]);
+    const key = safeDecode(nodeMatch[1]);
     const idx = NODES.findIndex((n) => n.key === key);
     if (idx < 0) return sendJson(res, 404, { ok: false, error: 'node not found: ' + key });
     if (req.method === 'DELETE') {
@@ -1599,7 +1693,7 @@ async function handleAdminApi(req, res) {
       return sendJson(res, 200, { ok: true, removed: { key: removed.key, name: removed.name } });
     }
     const body = await readJsonBody();
-    if (!body) return sendJson(res, 400, { ok: false, error: 'invalid JSON' });
+    if (!body) return badBody();
     const n = NODES[idx];
     if (typeof body.link === 'string' && body.link.trim()) {
       const link = body.link.trim();
@@ -1636,7 +1730,7 @@ async function handleAdminApi(req, res) {
   }
   const shareAction = p.match(/^\/api\/admin\/shares\/([^/]+)\/(refresh|enable|disable)$/);
   if (req.method === 'POST' && shareAction) {
-    const s = findShareByRef(decodeURIComponent(shareAction[1]));
+    const s = findShareByRef(safeDecode(shareAction[1]));
     if (!s) return sendJson(res, 404, { ok: false, error: 'share not found' });
     const action = shareAction[2];
     if (action === 'refresh') {
@@ -1648,12 +1742,17 @@ async function handleAdminApi(req, res) {
       return sendJson(res, 200, { ok: true, share: adminShareInfo(ns), note: 'old token is invalid immediately' });
     }
     s.enabled = action === 'enable';
+    const sess = sessions.get(s.sessionId);
+    if (sess) {
+      if (action === 'enable' && !sess.shareToken) sess.shareToken = s.token;
+      if (action === 'disable' && sess.shareToken === s.token) sess.shareToken = null;
+    }
     saveStateNow();
     return sendJson(res, 200, { ok: true, share: adminShareInfo(s) });
   }
   const shareDel = p.match(/^\/api\/admin\/shares\/([^/]+)$/);
   if (req.method === 'DELETE' && shareDel) {
-    const s = findShareByRef(decodeURIComponent(shareDel[1]));
+    const s = findShareByRef(safeDecode(shareDel[1]));
     if (!s) return sendJson(res, 404, { ok: false, error: 'share not found' });
     shares.delete(s.token);
     const sess = sessions.get(s.sessionId);
@@ -1667,7 +1766,7 @@ async function handleAdminApi(req, res) {
   }
   if (req.method === 'PUT' && p === '/api/admin/settings') {
     const body = await readJsonBody();
-    if (!body) return sendJson(res, 400, { ok: false, error: 'invalid JSON' });
+    if (!body) return badBody();
     const warnings = [];
     if ('carrot_threshold' in body) {
       const v = body.carrot_threshold;
@@ -1931,7 +2030,7 @@ async function loadNodes(){
   var h='';
   nodes.forEach(function(n,i){
     var probe=n.probe_node_id==null?'—':'#'+n.probe_node_id+' '+(n.online===true?'<span class="pill ok">在线</span>':n.online===false?'<span class="pill bad">离线</span>':'<span class="pill">不在探针里</span>');
-    h+='<tr><td><code>'+esc(n.key)+'</code></td><td><b>'+esc(n.name)+'</b><br><span class="muted">'+esc(n.region)+'</span></td><td>'+(n.expires_at?esc(n.expires_at):(n.expires_at_probe?esc(n.expires_at_probe)+' <span class="muted">探针</span>':'—'))+'</td><td><span class="pill">'+esc(n.protocol||'—')+'</span></td><td>'+esc(n.server||'—')+':'+(n.server_port==null?'—':n.server_port)+'<br><span class="muted">sni: '+esc(n.sni||'—')+'</span></td><td>'+probe+'</td><td><button type="button" onclick="editNode('+i+')">编辑</button> <button type="button" class="ghost" onclick="moveNode('+i+',-1)">↑</button><button type="button" class="ghost" onclick="moveNode('+i+',1)">↓</button> <button type="button" class="danger" onclick="delNode(\\''+esc(n.key)+'\\')">删除</button></td></tr>';
+    h+='<tr><td><code>'+esc(n.key)+'</code></td><td><b>'+esc(n.name)+'</b><br><span class="muted">'+esc(n.region)+'</span></td><td>'+(n.expires_at?esc(n.expires_at):(n.expires_at_probe?esc(n.expires_at_probe)+' <span class="muted">探针</span>':'—'))+'</td><td><span class="pill">'+esc(n.protocol||'—')+'</span></td><td>'+esc(n.server||'—')+':'+(n.server_port==null?'—':n.server_port)+'<br><span class="muted">sni: '+esc(n.sni||'—')+'</span></td><td>'+probe+'</td><td><button type="button" data-act="edit" data-i="'+i+'">编辑</button> <button type="button" class="ghost" data-act="up" data-i="'+i+'">↑</button><button type="button" class="ghost" data-act="down" data-i="'+i+'">↓</button> <button type="button" class="danger" data-act="del" data-i="'+i+'">删除</button></td></tr>';
   });
   document.getElementById('nodeRows').innerHTML=h||'<tr><td colspan="7"><div class="empty">暂无节点 · 在下方添加第一条</div></td></tr>';
   return true;
@@ -1941,7 +2040,7 @@ async function loadShares(){
   if(r.status!==200)return;
   var h='';
   r.json.shares.forEach(function(s){
-    h+='<tr><td><code>'+esc(s.token_masked)+'</code></td><td><code>'+esc(s.user_id)+'</code></td><td>'+fmtTime(s.created_at)+'<br><span class="muted">到期：'+fmtTime(s.expires_at)+'</span></td><td>'+(s.enabled?'<span class="pill ok">启用</span>':'<span class="pill bad">停用</span>')+'</td><td>'+s.access_count+' 次</td><td>'+esc(s.last_ip||'—')+'<br><span class="muted">'+fmtTime(s.last_access_at)+'</span></td><td><button type="button" onclick="shareAct(\\''+s.id+'\\',\\'refresh\\')">刷新</button> '+(s.enabled?'<button type="button" class="ghost" onclick="shareAct(\\''+s.id+'\\',\\'disable\\')">停用</button>':'<button type="button" class="ghost" onclick="shareAct(\\''+s.id+'\\',\\'enable\\')">启用</button>')+' <button type="button" class="danger" onclick="shareDel(\\''+s.id+'\\')">吊销</button></td></tr>';
+    h+='<tr><td><code>'+esc(s.token_masked)+'</code></td><td><code>'+esc(s.user_id)+'</code></td><td>'+fmtTime(s.created_at)+'<br><span class="muted">到期：'+fmtTime(s.expires_at)+'</span></td><td>'+(s.enabled?'<span class="pill ok">启用</span>':'<span class="pill bad">停用</span>')+'</td><td>'+s.access_count+' 次</td><td>'+esc(s.last_ip||'—')+'<br><span class="muted">'+fmtTime(s.last_access_at)+'</span></td><td><button type="button" data-act="refresh" data-id="'+esc(s.id)+'">刷新</button> '+(s.enabled?'<button type="button" class="ghost" data-act="disable" data-id="'+esc(s.id)+'">停用</button>':'<button type="button" class="ghost" data-act="enable" data-id="'+esc(s.id)+'">启用</button>')+' <button type="button" class="danger" data-act="revoke" data-id="'+esc(s.id)+'">吊销</button></td></tr>';
   });
   document.getElementById('shareRows').innerHTML=h||'<tr><td colspan="7"><div class="empty">暂无分享 · 用户首次登录后自动出现</div></td></tr>';
 }
@@ -1977,6 +2076,21 @@ window.delNode=async function(key){if(!confirm('确定删除节点 '+key+'？订
 window.moveNode=async function(i,dir){var j=i+dir;if(j<0||j>=nodes.length)return;var keys=nodes.map(function(n){return n.key});var t=keys[i];keys[i]=keys[j];keys[j]=t;var r=await api('POST','/api/admin/nodes/reorder',{keys:keys});if(!r.json.ok){document.getElementById('nodeMsg').textContent='排序失败：'+(r.json.error||'');return}await loadNodes()};
 window.shareAct=async function(id,action){var r=await api('POST','/api/admin/shares/'+encodeURIComponent(id)+'/'+action);if(!r.json.ok){document.getElementById('shareMsg').textContent='操作失败：'+(r.json.error||'');return}document.getElementById('shareMsg').textContent=action==='refresh'?'已刷新，旧链接立即失效。':(action==='disable'?'已停用。':'已启用。');await loadShares()};
 window.shareDel=async function(id){if(!confirm('确定吊销这条分享？对应用户的订阅链接立即失效。'))return;var r=await api('DELETE','/api/admin/shares/'+encodeURIComponent(id));if(!r.json.ok){document.getElementById('shareMsg').textContent='吊销失败：'+(r.json.error||'');return}document.getElementById('shareMsg').textContent='已吊销。';await loadShares()};
+// Event delegation: no user/server data is ever interpolated into JS code
+// inside an HTML attribute (HTML-entity escaping is NOT JS-string escaping).
+document.getElementById('nodeRows').addEventListener('click',function(e){
+  var b=e.target.closest('button[data-act]'); if(!b)return;
+  var i=Number(b.getAttribute('data-i')),a=b.getAttribute('data-act');
+  if(a==='edit')editNode(i);
+  else if(a==='up')moveNode(i,-1);
+  else if(a==='down')moveNode(i,1);
+  else if(a==='del'){var n=nodes[i];if(n)delNode(n.key);}
+});
+document.getElementById('shareRows').addEventListener('click',function(e){
+  var b=e.target.closest('button[data-act]'); if(!b)return;
+  var id=b.getAttribute('data-id'),a=b.getAttribute('data-act');
+  if(a==='revoke')shareDel(id); else shareAct(id,a);
+});
 document.getElementById('btnAdminLogin').onclick=async function(){
   var btn=document.getElementById('btnAdminLogin');
   var msg=document.getElementById('adminMsg');
@@ -2269,7 +2383,7 @@ const server = http.createServer(async (req, res) => {
       return await serveSubscription(req, res, token);
     }
     if (req.method === 'GET' && u.pathname.startsWith('/sub/')) {
-      const token = decodeURIComponent(u.pathname.slice(5));
+      const token = safeDecode(u.pathname.slice(5));
       return await handleSub(req, res, token);
     }
     return sendJson(res, 404, { ok: false, error: 'not found' });
@@ -2297,5 +2411,5 @@ const HTML_RENDERED = HTML.split('{{VERSION}}').join(VERSION);
 const ADMIN_HTML_RENDERED = ADMIN_HTML.split('{{VERSION}}').join(VERSION);
 
 // Pure helpers exported for test/check-pages.js unit tests (no server started).
-module.exports = { server, monthEndExpireMs, normalizeExpiry, validateProbeId, parseHy2, parseVless, resolveClientIp, VERSION };
+module.exports = { server, monthEndExpireMs, normalizeExpiry, validateProbeId, parseHy2, parseVless, resolveClientIp, safeDecode, VERSION };
 

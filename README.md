@@ -2,9 +2,11 @@
 
 EMOS 登录核验萝卜余额，**严格大于门槛（默认 500，可在后台改）**才能进控制台、领取每人专属的订阅链接。节点流量取自 1e.lol 探针的整机总流量，不做每人用量统计。
 
-当前版本：**v1.5.4**（2026-11-26）
+当前版本：**v1.5.5**（2026-11-26，安全修复版；修复项见 `test/check-fixes.js`）
 
 零依赖 Node.js（Node ≥ 18），不用 `npm install`。单文件 `server.js` + `config/` + `manage.sh`。
+
+`config/nodes.json` 已被 git 忽略（后台保存后含真实节点凭证）。首次启动会自动从 `config/nodes.example.json` 生成一份 0600 的副本；升级不会覆盖它。
 
 ## 快速开始
 
@@ -38,7 +40,7 @@ PORT=3000 ADMIN_TOKEN=你的口令 node server.js
 ./manage.sh uninstall     # 先备份，确认后停服务并删除
 ```
 
-`update` 只更新代码文件，`.env` 和 `config/`（节点、设置）原样保留，更新前自动备份到 `backups/`（只留最近 10 个）。完整命令见 `./manage.sh help`。旧版 `manage.sh` 的 `update` 若报 `There is no tracking information`，先用 `curl -fsSL https://raw.githubusercontent.com/MechanicF/emos-sub/main/manage.sh -o manage.sh && chmod +x manage.sh && ./manage.sh update` 换新版再跑。
+`update` 只更新代码文件，`.env` 和 `config/`（节点、设置）原样保留，更新前自动备份到 `backups/`（只留最近 10 个，权限 0600）。节点模板 `config/nodes.example.json` 随代码更新，真实 `nodes.json` 不参与版本控制。完整命令见 `./manage.sh help`。旧版 `manage.sh` 的 `update` 若报 `There is no tracking information`，先用 `curl -fsSL https://raw.githubusercontent.com/MechanicF/emos-sub/main/manage.sh -o manage.sh && chmod +x manage.sh && ./manage.sh update` 换新版再跑。
 
 ## 怎么用
 
@@ -93,11 +95,17 @@ PORT=3000 ADMIN_TOKEN=你的口令 node server.js
 | `EMOS_APP_NAME` | emos-sub | EMOS `/link` 登录页显示的应用名 |
 | `TRUST_PROXY` | auto | 是否信任 `X-Forwarded-For`：`auto` 只信任本机/内网来源；`1` 总是信任；`0` 永不信任 |
 | `PROBE_URL` | https://1e.lol/api/nodes | 探针接口地址 |
+| `EMOS_BASE` | https://emos.best | EMOS API 地址 |
+| `CARROT_RECHECK_MS` | 600000 | 订阅取用时余额复核间隔（毫秒） |
+| `CARROT_GRACE_MS` | 86400000 | EMOS 不可达时允许继续服务的**硬上限**（毫秒），超时强制吊销 |
+| `PROBE_FAIL_CACHE_MS` | 60000 | 探针失败后的负缓存时长（毫秒） |
+| `EMOS_STATE_FILE` | config/state.json | 会话/分享落盘位置 |
+| `ADMIN_LOGIN_MAX_FAILS` / `ADMIN_LOGIN_LOCK_MS` | 5 / 900000 | 后台口令连错次数与锁定时长（毫秒） |
 | `DEMO_ENABLED` | （空） | 仅测试：设 `1` 才允许演示登录 |
 
 后台“设置”页可改门槛、有效期、命名规则、探针缓存，写 `settings.json` 立即生效。优先级：环境变量 > `settings.json` > 默认值。
 
-节点放 `config/nodes.json`（协议链接 + 地区 + 探针 id + 到期 `expires_at`，可空）。后台增删改节点原子写入并留 `.bak`，立即生效，不用重启。
+节点放 `config/nodes.json`（首次启动由 `nodes.example.json` 生成，git 忽略、权限 0600；协议链接 + 地区 + 探针 id + 到期 `expires_at`，可空）。后台增删改节点原子写入（0600）并留 `.bak`，立即生效，不用重启。
 
 ## 安全
 
@@ -105,7 +113,10 @@ PORT=3000 ADMIN_TOKEN=你的口令 node server.js
 - 限流：`/api/auth` 和 EMOS 跳转每 IP 10 分钟 30 次；订阅端点每 IP 每分钟 120 次。
 - 萝卜掉下门槛立即吊销：订阅取用时最多 10 分钟核验一次；核验失败当场删会话和链接；EMOS 临时挂掉不断订阅，只推迟 60 秒再核验。
 - 每人一个有效登录，新登录吊销旧会话和旧链接；刷新订阅也要先核验萝卜。
-- 会话和分享落盘到 `config/state.json`（0600，git 忽略，随备份走），重启/更新后订阅照常用；文件里有活的 EMOS token，别提交、别外发。
+- EMOS 身份强制校验：`sign/check` 失败即拒绝登录，绝不再退化成共享的 `unknown` 用户（否则一人登录会踢掉所有人）。
+- 管理员吊销 / 停用后，用户**不能**靠「刷新订阅链接」自助复活，必须重新登录；管理员主动刷新或启用可恢复。
+- EMOS 故障时的 `stale` 宽限有硬上限（`CARROT_GRACE_MS`，默认 24 小时），超时强制吊销，不会无限续期。
+- 会话和分享落盘到 `config/state.json`（0600，git 忽略，随备份走），重启/更新后订阅照常用；文件里有活的 EMOS token，别提交、别外发。备份包以 `umask 077` 生成、权限 0600；卸载时备份失败会中止删除。
 - Cookie 都是 HttpOnly + SameSite=Lax，https 下自动加 Secure；响应带 nosniff / no-referrer / DENY 安全头。
 
 ## 接口
@@ -115,16 +126,19 @@ PORT=3000 ADMIN_TOKEN=你的口令 node server.js
 - `POST /api/auth` 登录；`POST /api/logout` 退出
 - `GET /api/nodes` 节点 + 探针流量；`GET /api/sub-link` 当前订阅地址；`POST /api/sub/refresh` 轮换；`POST /api/sub/disable` 停用
 - `GET /c/?token=&client=`、`GET /sub/:token` 订阅内容；`GET /health` 健康检查；`GET /api/public-settings` 当前门槛
-- 后台：`POST /api/admin/login|logout`、`GET /api/admin/health`、`/api/admin/nodes`（增删改 + `/parse`、`/reorder`）、`/api/admin/shares`（刷新/停用/启用/吊销/全部吊销）、`/api/admin/settings`
+- 后台：`POST /api/admin/login|logout`、`GET /api/admin/health`、`/api/admin/nodes`（增删改 + `/parse`、`/reorder`）、`/api/admin/shares`（刷新/停用/启用/吊销/全部吊销 `/revoke-all`）、`/api/admin/settings`
+- 辅助：`GET /api/auth/emos/login-url`、`GET /api/public-settings`；`X-Forwarded-Proto` 只接受 `http`/`https` 且仅信任代理来源
 
 ## 测试
 
 ```bash
 node test/check-pages.js   # 启动真服务跑回归（60 项）：实发页面脚本校验、订阅结构、限流、吊销流程、重启落盘等
+node test/check-fixes.js   # v1.5.5 安全回归：身份绑定、吊销不可复活、门禁硬上限、XFP 白名单、413、探针标签、% 解析、事件委托
 ```
 
 ## 版本历史
 
+- **v1.5.5**：安全修复版 — EMOS 身份强制校验（不再退化为 `unknown`）；管理员吊销/停用后必须重新登录；EMOS 故障宽限加硬上限；`X-Forwarded-Proto` 白名单 + 代理信任；超大 body 返回 413 而非断连；探针二次失败标签修正；节点/备份文件 0600 且 `nodes.json` 改为 git 忽略 + example 模板；后台表格改事件委托；未编码 `%` 不再吞掉节点；探针流量按机器去重；订阅响应补安全头；全局异常累计 5 次退出让 systemd 干净重启
 - **v1.5.4**：后台改成 Tab 分区（节点/分享/设置，吸顶 + 记忆上次 Tab）；健康信息行卡片化、表格空状态和消息提示美化
 - **v1.5.3**：合入三项优化（订阅 body 缓存、吊销同步 session、排序校验）；另修 `/api/sub-link`：无有效分享时返回 410，不再给 `.../sub/null` 死链接
 - **v1.5.2**：合入第三方审查加固（XFF 伪造防护、探针失败负缓存 60 秒 + 并发合并、后台失败计数清扫、页面预渲染、`PROBE_URL` 可配）
