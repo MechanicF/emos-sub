@@ -1,4 +1,4 @@
-// EMOS-gated sing-box gateway v1.5.2 — zero dependencies.
+// EMOS-gated sing-box gateway v1.5.3 — zero dependencies.
 // Node >= 18 (uses global fetch). Run: node server.js  (PORT env, default 3000)
 // Scope: EMOS login -> carrot > 500 -> console (nodes + per-user sub links)
 // + NODE TOTAL traffic only, from https://1e.lol/api/nodes. NO per-user traffic.
@@ -19,7 +19,7 @@ const path = require('path');
 const crypto = require('crypto');
 
 const PORT = parseInt(process.env.PORT || '3000', 10);
-const VERSION = '1.5.2';
+const VERSION = '1.5.3';
 const CONFIG_PATH = path.join(__dirname, 'config', 'nodes.json');
 const CLASH_TEMPLATE_PATH = path.join(__dirname, 'config', 'templates', 'clash.yaml');
 const SINGBOX_TEMPLATE_PATH = path.join(__dirname, 'config', 'templates', 'singbox.json');
@@ -379,11 +379,28 @@ function atomicWrite(filePath, content) {
   fs.writeFileSync(tmp, content, 'utf8');
   fs.renameSync(tmp, filePath);
 }
+// Subscription bodies (clash/singbox/links/b64) depend only on NODES and
+// NAME_RULE, not on the user/token — the per-user part (Subscription-Userinfo)
+// is a separate header. Cache the rendered bodies and invalidate whenever
+// nodes or the naming rule change, so a flood of subscription fetches does
+// not re-parse every node link and re-merge the ACL rule set each time.
+let configEpoch = 0;
+const subBodyCache = new Map(); // format -> { epoch, body }
+function bumpSubCache() { configEpoch += 1; subBodyCache.clear(); }
+function cachedSubBody(format, build) {
+  const hit = subBodyCache.get(format);
+  if (hit && hit.epoch === configEpoch) return hit.body;
+  const body = build();
+  subBodyCache.set(format, { epoch: configEpoch, body });
+  return body;
+}
+
 function saveNodesConfig() {
   const prev = path.join(__dirname, 'config', 'nodes.json.bak');
   try { fs.copyFileSync(CONFIG_PATH, prev); } catch (e) { /* first save: no previous file */ }
   const doc = { _note: NODES_NOTE, name_rule: NAME_RULE, nodes: NODES };
   atomicWrite(CONFIG_PATH, JSON.stringify(doc));
+  bumpSubCache();
 }
 function saveSettingsFile() {
   const doc = {
@@ -1295,8 +1312,12 @@ async function handleNodes(req, res) {
 function handleSubLink(req, res) {
   const s = getSession(req);
   if (!s) return sendJson(res, 401, { ok: false, error: 'missing or expired X-Session — login first' });
-  const share = shares.get(s.shareToken);
-  const urls = subUrls(req, s.shareToken);
+  // No live share (admin-revoked, disabled or expired): say so with a 410
+  // instead of building a URL around a null/stale token (".../sub/null").
+  // The console already treats a non-200 here as "log in again".
+  const share = getShare(s.shareToken);
+  if (!share) return sendJson(res, 410, { ok: false, error: 'subscription revoked or expired — refresh the link or log in again' });
+  const urls = subUrls(req, share.token);
   return sendJson(res, 200, { ok: true, user_id: s.user_id, demo: s.demo, sub_url: urls.url, sub_urls: urls, import_url: urls.import_url, share: shareInfo(share) });
 }
 
@@ -1434,7 +1455,7 @@ async function serveSubscription(req, res, token) {
   // headers are sent leaves the connection hanging (and used to crash the
   // process via the un-awaited handler — see dispatcher).
   if (format === 'clash') {
-    const body = buildClashYaml();
+    const body = cachedSubBody('clash', buildClashYaml);
     res.writeHead(200, { 'Content-Type': 'text/yaml; charset=utf-8', 'profile-update-interval': '24', ...commonHeaders });
     return res.end(body);
   }
@@ -1444,19 +1465,19 @@ async function serveSubscription(req, res, token) {
     return res.end(body);
   }
   if (format === 'links') {
-    const body = buildLinksText();
+    const body = cachedSubBody('links', buildLinksText);
     res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8', ...commonHeaders });
     return res.end(body);
   }
   if (format === 'b64') {
-    const body = Buffer.from(buildLinksText(), 'utf8').toString('base64') + '\n';
+    const body = cachedSubBody('b64', () => Buffer.from(buildLinksText(), 'utf8').toString('base64') + '\n');
     res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8', ...commonHeaders });
     return res.end(body);
   }
   // singbox (default for sing-box / Hiddify / Karing UA, and ?format=singbox)
-  const cfg = buildSingBoxConfig();
+  const body = cachedSubBody('singbox', () => JSON.stringify(buildSingBoxConfig(), null, 2));
   res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', ...commonHeaders });
-  res.end(JSON.stringify(cfg, null, 2));
+  res.end(body);
 }
 
 async function handleSub(req, res, subToken) { return serveSubscription(req, res, subToken); }
@@ -1561,7 +1582,9 @@ async function handleAdminApi(req, res) {
     if (keys.length !== current.length || keys.some((k) => current.indexOf(k) < 0)) {
       return sendJson(res, 400, { ok: false, error: 'keys must contain exactly the current node keys, in the new order' });
     }
-    NODES = keys.map((k) => NODES.find((n) => n.key === k));
+    const reordered = keys.map((k) => NODES.find((n) => n.key === k));
+    if (reordered.some((n) => !n)) return sendJson(res, 400, { ok: false, error: 'reorder failed: a node key could not be resolved' });
+    NODES = reordered;
     saveNodesConfig();
     return sendJson(res, 200, { ok: true, keys: NODES.map((n) => n.key) });
   }
@@ -1605,6 +1628,9 @@ async function handleAdminApi(req, res) {
   if (req.method === 'POST' && p === '/api/admin/shares/revoke-all') {
     const count = shares.size;
     shares.clear();
+    // Keep sessions in sync: a stale shareToken makes /api/sub-link return a
+    // dead URL (the subscription itself is already 403, so this is a UI fix).
+    for (const sess of sessions.values()) sess.shareToken = null;
     saveStateNow();
     return sendJson(res, 200, { ok: true, revoked: count, note: 'All subscription tokens are now invalid; users must log in again to get a new share.' });
   }
@@ -1630,6 +1656,8 @@ async function handleAdminApi(req, res) {
     const s = findShareByRef(decodeURIComponent(shareDel[1]));
     if (!s) return sendJson(res, 404, { ok: false, error: 'share not found' });
     shares.delete(s.token);
+    const sess = sessions.get(s.sessionId);
+    if (sess && sess.shareToken === s.token) sess.shareToken = null;
     saveStateNow();
     return sendJson(res, 200, { ok: true, revoked: s.id || s.token });
   }
@@ -1658,6 +1686,7 @@ async function handleAdminApi(req, res) {
     if ('name_rule' in body) {
       const v = body.name_rule;
       if (typeof v !== 'string' || !v.trim()) return sendJson(res, 400, { ok: false, error: 'name_rule must be a non-empty string' });
+      if (v.trim() !== NAME_RULE) bumpSubCache();
       NAME_RULE = v.trim();
       SETTINGS_SOURCES.name_rule = 'settings';
     }

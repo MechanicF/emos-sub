@@ -221,6 +221,44 @@ const srv = spawnServer(REPO, PORT, { EMOS_STATE_FILE: stateFile('main') });
     const restoreTh = await putJson(PORT, '/api/admin/settings', { carrot_threshold: 500 }, { 'X-Admin-Token': 'test-token' });
     if (!restoreTh.ok || restoreTh.settings.carrot_threshold !== 500) fail('could not restore carrot_threshold to 500');
     else ok('threshold restored to 500');
+
+    // Subscription body cache: repeated fetches are byte-identical (cached),
+    // and a naming-rule change must invalidate it immediately (configEpoch).
+    // Use auth2's token: auth's session was revoked by the second login above,
+    // so /c/ with it returns the same 403 body regardless of the naming rule.
+    const subUrl = '/c/?token=' + encodeURIComponent(auth2.sub_token) + '&client=clash';
+    const c1 = await get(PORT, subUrl);
+    const c2 = await get(PORT, subUrl);
+    if (c1 !== c2) fail('cached clash body changed between identical fetches');
+    else ok('clash body is stable across repeated fetches (cache)');
+    const setRule = await putJson(PORT, '/api/admin/settings', { name_rule: 'TEST-[$Name]' }, { 'X-Admin-Token': 'test-token' });
+    const c3 = await get(PORT, subUrl);
+    if (!setRule.ok || c3 === c1) fail('clash body did not change after name_rule update (stale cache)');
+    else if (!c3.includes('TEST-')) fail('clash body after name_rule update lacks new prefix');
+    else ok('clash body invalidates immediately on name_rule change');
+    const restoreRule = await putJson(PORT, '/api/admin/settings', { name_rule: '[$Flag] $LinkCountryName - $Name' }, { 'X-Admin-Token': 'test-token' });
+    const c4 = await get(PORT, subUrl);
+    if (!restoreRule.ok || c4 !== c1) fail('clash body not restored after name_rule reset');
+    else ok('clash body restored after name_rule reset');
+
+    // Admin revoke clears the session's shareToken so /api/sub-link no longer
+    // hands out a dead URL (the subscription itself is 403 either way).
+    const beforeRevoke = await get(PORT, '/api/sub-link', { 'X-Session': auth2.session });
+    if (!beforeRevoke.includes(auth2.sub_token)) fail('sub-link did not show the live token before revoke');
+    else {
+      const rv = await reqRaw(PORT, 'DELETE', '/api/admin/shares/' + encodeURIComponent(auth2.sub_token), { 'X-Admin-Token': 'test-token' });
+      if (rv.status !== 200) fail('admin revoke failed: ' + rv.status);
+      else {
+        const afterRevoke = await get(PORT, '/api/sub-link', { 'X-Session': auth2.session });
+        if (afterRevoke.includes(auth2.sub_token)) fail('sub-link still shows revoked token after admin revoke');
+        else ok('admin revoke clears session shareToken (sub-link no dead URL)');
+        // Follow-up: no live share must be a clean 410, never a ".../sub/null" URL.
+        const afterRevokeRaw = await reqRaw(PORT, 'GET', '/api/sub-link', { 'X-Session': auth2.session });
+        if (afterRevokeRaw.status !== 410) fail('sub-link after revoke should be 410, got ' + afterRevokeRaw.status);
+        else if (afterRevokeRaw.body.includes('/sub/null') || afterRevokeRaw.body.includes('token=null')) fail('sub-link after revoke still hands out a null URL');
+        else ok('sub-link after revoke returns 410, no null URL');
+      }
+    }
   } catch (e) { console.error('FAIL', e.message); code = 1; }
   srv.kill();
 
