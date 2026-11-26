@@ -2,7 +2,24 @@
 
 零依赖 Node.js（Node ≥ 18），不用 `npm install`。
 
-## 运行
+## 一键运行（端口自定义）
+
+```bash
+git clone https://github.com/MechanicF/emos-sub.git
+cd emos-sub
+# 一键启动：PORT 改成你想要的端口，ADMIN_TOKEN 是后台口令
+PORT=3000 ADMIN_TOKEN=你的口令 node server.js
+# 换个端口就改 PORT，比如 8080：
+# PORT=8080 ADMIN_TOKEN=你的口令 node server.js
+```
+
+- 默认端口 `3000`，不设 `PORT` 就是 3000；`PORT` 只认数字，设错了会报错退出。
+- 启动后：用户控制台 `http://127.0.0.1:<端口>/`，后台 `http://127.0.0.1:<端口>/admin`。
+- 后台不设 `ADMIN_TOKEN` 也能启动用户控制台，但 `/admin` 会返回 503。
+- 后台运行（断开终端也不停）：`PORT=3000 ADMIN_TOKEN=你的口令 nohup node server.js > server.log 2>&1 &`
+- 也可以用仓库里的脚本：`PORT=3000 ADMIN_TOKEN=你的口令 ./start.sh`（脚本会检查 Node 版本、端口是否被占用，没设 `ADMIN_TOKEN` 时会提示只启动用户控制台）。
+
+## 运行（手动）
 
 ```bash
 node server.js
