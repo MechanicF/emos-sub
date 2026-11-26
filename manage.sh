@@ -77,7 +77,11 @@ gen_token() { head -c 24 /dev/urandom 2>/dev/null | base64 | tr -d '/+=' | head 
 cmd_status() {
   say "== emos-sub 状态 =="
   say "安装目录：$INSTALL_DIR  $([ -d "$INSTALL_DIR" ] && echo "（已安装）" || echo "（未安装）")"
-  [ -f "$INSTALL_DIR/server.js" ] && say "版本：$(cd "$INSTALL_DIR" && git log --oneline -1 2>/dev/null || echo "未用 git 安装")"
+  if [ -f "$INSTALL_DIR/server.js" ]; then
+    local v; v="$(cd "$INSTALL_DIR" && git rev-parse --short origin/main 2>/dev/null)"
+    if [ -n "$v" ]; then say "版本：origin/main $v"
+    else say "版本：$(cd "$INSTALL_DIR" && git log --oneline -1 2>/dev/null || echo "未用 git 安装")"; fi
+  fi
   local pid; pid="$(running_pid)"
   if has_systemd && [ -f "$UNIT" ]; then
     systemctl is-enabled "$SERVICE" >/dev/null 2>&1 && say "开机自启：已开启" || say "开机自启：未开启"

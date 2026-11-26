@@ -1480,4 +1480,3 @@ server.listen(PORT, () => {
   console.log('nodes loaded: ' + NODES.map((n) => n.key + '->probe#' + n.probe_node_id).join(', '));
 });
 
-// upstream-update-test-marker 2026-11-26
