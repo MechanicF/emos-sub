@@ -55,6 +55,18 @@ unit('XFF auto: IPv4-mapped loopback trusts forwarded IP', rip('::ffff:127.0.0.1
 unit('XFF mode 1 always trusts (old behaviour, opt-in)', rip('8.8.8.8', '1.2.3.4', '1') === '1.2.3.4');
 unit('XFF mode 0 never trusts (direct deploy, hardened)', rip('127.0.0.1', '1.2.3.4', '0') === '127.0.0.1');
 unit('XFF empty value falls back to peer IP', rip('127.0.0.1', '  ', 'auto') === '127.0.0.1');
+// Reverse-proxy IP resolution: accept the common forwarding headers, reject
+// forged XFF chains, and normalise IPv4-mapped addresses before display.
+const pick = lib.pickClientIp;
+unit('IPv4-mapped peer is normalised', pick('::ffff:127.0.0.1', {}, 'auto', 1).ip === '127.0.0.1');
+unit('X-Real-IP is honoured from a trusted proxy', pick('::ffff:127.0.0.1', { 'x-real-ip': '203.0.113.9' }, 'auto', 1).ip === '203.0.113.9');
+unit('CF-Connecting-IP is honoured from a trusted proxy', pick('127.0.0.1', { 'cf-connecting-ip': '203.0.113.9' }, 'auto', 1).ip === '203.0.113.9');
+unit('RFC 7239 Forwarded is honoured', pick('127.0.0.1', { forwarded: 'for=203.0.113.9;proto=https' }, 'auto', 1).ip === '203.0.113.9');
+unit('untrusted public peer ignores X-Real-IP', pick('8.8.8.8', { 'x-real-ip': '203.0.113.9' }, 'auto', 1).ip === '8.8.8.8');
+unit('forged XFF cannot override the proxy-appended address', pick('127.0.0.1', { 'x-forwarded-for': '1.1.1.1, 203.0.113.9' }, 'auto', 1).ip === '203.0.113.9');
+unit('two trusted hops pick the original client', pick('127.0.0.1', { 'x-forwarded-for': '203.0.113.9, 10.0.0.5' }, 'auto', 2).ip === '203.0.113.9');
+unit('non-IP XFF entries are discarded', pick('127.0.0.1', { 'x-forwarded-for': 'unknown, 203.0.113.9' }, 'auto', 1).ip === '203.0.113.9');
+unit('IPv6 client address is preserved', pick('127.0.0.1', { 'x-forwarded-for': '2001:db8::1' }, 'auto', 1).ip === '2001:db8::1');
 if (unitFail) process.exit(1);
 
 // ---- HTTP helpers ---------------------------------------------------------

@@ -2,7 +2,7 @@
 
 EMOS 登录核验萝卜余额，**严格大于门槛（默认 500，可在后台改）**才能进控制台、领取每人专属的订阅链接。节点流量取自 1e.lol 探针的整机总流量，不做每人用量统计。
 
-当前版本：**v1.5.11**（2026-11-26，服务端首屏版）
+当前版本：**v1.5.12**（2026-11-26，反代真实 IP 版）
 
 零依赖 Node.js（Node ≥ 18），不用 `npm install`。单文件 `server.js` + `config/` + `manage.sh`。
 
@@ -93,7 +93,10 @@ PORT=3000 ADMIN_TOKEN=你的口令 node server.js
 | `SHARE_TTL_HOURS` | 24 | 分享有效期（小时），0 = 永不过期 |
 | `PROBE_CACHE_SECONDS` | 30 | 探针缓存（秒） |
 | `EMOS_APP_NAME` | emos-sub | EMOS `/link` 登录页显示的应用名 |
-| `TRUST_PROXY` | auto | 是否信任 `X-Forwarded-For`：`auto` 只信任本机/内网来源；`1` 总是信任；`0` 永不信任 |
+| `TRUST_PROXY` | auto | 是否信任转发头里的客户端 IP：`auto` 只信任本机/内网来源；`1` 总是信任；`0` 永不信任 |
+| `TRUST_PROXY_HOPS` | 1 | 可信反代层数：从 `X-Forwarded-For` 链右往左取值，客户端伪造的前缀无效。单级反代填 1，CDN + Nginx 填 2 |
+| `TRUST_PROXY_IPS` | （空） | 精确指定可信反代来源（逗号分隔 IP 或 IPv4 CIDR，如 `127.0.0.1,172.17.0.0/16`）；设置后 `auto` 只信任这些来源 |
+| `CLIENT_IP_HEADER` | （空） | 指定优先读取的转发头（如 `cf-connecting-ip`）；默认顺序 `X-Forwarded-For → X-Real-IP → CF-Connecting-IP → True-Client-IP → X-Client-IP → Forwarded` |
 | `PROBE_URL` | https://1e.lol/api/nodes | 探针接口地址 |
 | `EMOS_BASE` | https://emos.best | EMOS API 地址 |
 | `CARROT_RECHECK_MS` | 600000 | 订阅取用时余额复核间隔（毫秒） |
@@ -119,6 +122,71 @@ PORT=3000 ADMIN_TOKEN=你的口令 node server.js
 - 会话和分享落盘到 `config/state.json`（0600，git 忽略，随备份走），重启/更新后订阅照常用；文件里有活的 EMOS token，别提交、别外发。备份包以 `umask 077` 生成、权限 0600；卸载时备份失败会中止删除。
 - Cookie 都是 HttpOnly + SameSite=Lax，https 下自动加 Secure；响应带 nosniff / no-referrer / DENY 安全头。
 
+## 反向代理与真实客户端 IP
+
+反代会终止 TCP 连接，本服务看到的 `socket.remoteAddress` 永远是反代自己（常见 `::ffff:127.0.0.1`）。**如果分享列表的「最后 IP」全是这个值，说明反代没有传客户端 IP 头**，或只传了旧版本不支持的头（现在 `X-Forwarded-For`、`X-Real-IP`、`CF-Connecting-IP`、`True-Client-IP`、`X-Client-IP`、RFC 7239 `Forwarded` 都支持）。服务无法凭空还原真实 IP，反代必须把原地址写进请求头。
+
+### Nginx
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name sub.example.com;
+
+    location / {
+        proxy_pass http://127.0.0.1:3000;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        # 关键：用 $proxy_add_x_forwarded_for 追加对端地址，
+        # 不要只透传 $http_x_forwarded_for（那样客户端可伪造）。
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+```
+
+### Caddy 2
+
+```caddy
+sub.example.com {
+    reverse_proxy 127.0.0.1:3000
+}
+```
+
+Caddy 默认就会追加 `X-Forwarded-For` 并带上 `X-Forwarded-Proto`，一般无需额外配置。
+
+### 多层代理 / CDN
+
+`X-Forwarded-For` 是一条链：`客户端, 代理1, 代理2`。本服务按 `TRUST_PROXY_HOPS`（默认 1）**从右往左**取值，取的是反代实际看到的地址，客户端伪造的前缀不生效。CDN + Nginx 两级时设 `TRUST_PROXY_HOPS=2`；Cloudflare 可另设 `CLIENT_IP_HEADER=cf-connecting-ip` 优先读它。非 IP 值（如 `unknown`）会被丢弃，`::ffff:` 前缀与 IPv6 区域标识会规范化。
+
+### 安全边界
+
+转发头在直连时是客户端可伪造的，所以只在「连接来自可信反代」时才采信：
+
+- 默认 `TRUST_PROXY=auto` 信任 loopback / 内网来源（本机 Nginx、Docker bridge 等）；
+- 反代走公网 IP、或想收紧范围时用 `TRUST_PROXY_IPS=反代IP或CIDR`；
+- **端口若直接暴露到公网，务必保持 `auto` 或 `0`，不要设 `TRUST_PROXY=1`**，否则任何人都能靠伪造头绕过按 IP 限流。
+
+systemd 部署在 `/etc/systemd/system/emos-sub.service` 的 `[Service]` 段加：
+
+```ini
+Environment=TRUST_PROXY=auto
+Environment=TRUST_PROXY_HOPS=1
+```
+
+改完 `systemctl daemon-reload && systemctl restart emos-sub`。
+
+### 自查
+
+登录后台 →「设置」Tab →「反代 IP 诊断」→ 点「检查来源 IP」；或：
+
+```bash
+curl -s -H 'X-Admin-Token: 你的口令' https://sub.example.com/api/admin/ip-check
+```
+
+返回里看三个字段：`peer`（TCP 对端）、`headers`（反代传了哪些头）、`resolved`（最终采用的 IP）。若 `source` 是 `peer` 且 `headers` 全为 `null`，就是反代没传头，按上面配置补上；`hint` 会直接给出对应建议。此接口需要后台鉴权，只回显 IP 相关头。
+
 ## 接口
 
 - `GET /` 控制台；`GET /admin` 后台
@@ -126,18 +194,19 @@ PORT=3000 ADMIN_TOKEN=你的口令 node server.js
 - `POST /api/auth` 登录（接口保留供程序调用与回归测试，控制台不再提供粘贴 Token 入口）；`POST /api/logout` 退出
 - `GET /api/nodes` 节点 + 探针流量；`GET /api/sub-link` 当前订阅地址；`POST /api/sub/refresh` 轮换；`POST /api/sub/disable` 停用
 - `GET /c/?token=&client=`、`GET /sub/:token` 订阅内容；`GET /health` 健康检查；`GET /api/public-settings` 当前门槛
-- 后台：`POST /api/admin/login|logout`、`GET /api/admin/health`、`/api/admin/nodes`（增删改 + `/parse`、`/reorder`）、`/api/admin/shares`（刷新/停用/启用/吊销/全部吊销 `/revoke-all`）、`/api/admin/settings`
+- 后台：`POST /api/admin/login|logout`、`GET /api/admin/health`、`/api/admin/nodes`（增删改 + `/parse`、`/reorder`）、`/api/admin/shares`（刷新/停用/启用/吊销/全部吊销 `/revoke-all`）、`/api/admin/settings`、`GET /api/admin/ip-check`（反代来源 IP 诊断，需鉴权）
 - 辅助：`GET /api/auth/emos/login-url`、`GET /api/public-settings`；`X-Forwarded-Proto` 只接受 `http`/`https` 且仅信任代理来源
 
 ## 测试
 
 ```bash
-node test/check-pages.js   # 启动真服务跑回归（60 项）：实发页面脚本校验、订阅结构、限流、吊销流程、重启落盘等
+node test/check-pages.js   # 启动真服务跑回归（76 项）：实发页面脚本校验、订阅结构、限流、吊销流程、重启落盘等
 node test/check-fixes.js   # v1.5.5 安全回归：身份绑定、吊销不可复活、门禁硬上限、XFP 白名单、413、探针标签、% 解析、事件委托
 ```
 
 ## 版本历史
 
+- **v1.5.12**：反代真实 IP 版 — 客户端 IP 从转发链右往左取（默认 1 级反代），伪造 XFF 前缀失效；支持 X-Real-IP / CF-Connecting-IP / True-Client-IP / Forwarded，`::ffff:` 与脏值规范化；新增 TRUST_PROXY_HOPS / TRUST_PROXY_IPS / CLIENT_IP_HEADER；后台「设置」Tab 加反代 IP 诊断（GET /api/admin/ip-check，需鉴权）；README 补 Nginx/Caddy 配置
 - **v1.5.11**：服务端首屏版 — 服务端按会话直接渲染控制台首屏（登录卡隐藏、萝卜/订阅链接已填好），已登录刷新不再闪登录界面；接口并行拉取，失效会话切回登录并提示；页面带 no-store 防代理串号
 - **v1.5.10**：去手动刷新版 — 删掉控制台「刷新流量」按钮，节点表本来就每 30 秒自动刷新
 - **v1.5.9**：单复制入口版 — 删掉与“复制”重复的「一键导入」按钮，控制台只剩一个复制入口；复制逻辑带“链接还没准备好”兜底；测试断言同步改成单复制入口

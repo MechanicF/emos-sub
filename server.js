@@ -1,4 +1,4 @@
-// EMOS-gated sing-box gateway v1.5.11 — zero dependencies.
+// EMOS-gated sing-box gateway v1.5.12 — zero dependencies.
 // Node >= 18 (uses global fetch). Run: node server.js  (PORT env, default 3000)
 // Scope: EMOS login -> carrot > 500 -> console (nodes + per-user sub links)
 // + NODE TOTAL traffic only, from https://1e.lol/api/nodes. NO per-user traffic.
@@ -23,9 +23,10 @@ process.on('uncaughtException', (e) => noteFatal('UNCAUGHT EXCEPTION', e));
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const net = require('net');
 
 const PORT = parseInt(process.env.PORT || '3000', 10);
-const VERSION = '1.5.11';
+const VERSION = '1.5.12';
 const CONFIG_PATH = path.join(__dirname, 'config', 'nodes.json');
 const CLASH_TEMPLATE_PATH = path.join(__dirname, 'config', 'templates', 'clash.yaml');
 const SINGBOX_TEMPLATE_PATH = path.join(__dirname, 'config', 'templates', 'singbox.json');
@@ -151,41 +152,126 @@ function shareInfo(s) {
   if (!s) return null;
   return { id: s.id || null, token: s.token, user_id: s.user_id, created_at: s.created_at, expires_at: s.expires_at, enabled: s.enabled, access_count: s.access_count, last_ip: s.last_ip, last_user_agent: s.last_user_agent, last_access_at: s.last_access_at };
 }
-// Anti-spoof: X-Forwarded-For is attacker-controlled on a direct connection.
-// Default 'auto' trusts it only when the peer is loopback/private (the usual
-// local reverse-proxy setup), so existing reverse-proxy deployments keep
-// per-user IPs while a direct-to-Internet deployment can no longer bypass
-// IP rate limits by rotating a fake XFF. Override with TRUST_PROXY=1 (always
-// trust, old behaviour) or TRUST_PROXY=0 (never trust).
+// --- Client IP behind a reverse proxy ------------------------------------
+// A reverse proxy terminates the TCP connection, so socket.remoteAddress is
+// always the proxy itself (often "::ffff:127.0.0.1"). The real client IP
+// arrives in a forwarding header. Those headers are attacker-controlled on a
+// direct connection, so they are honoured only when the peer is a trusted
+// proxy. Override with TRUST_PROXY=1 (always) or TRUST_PROXY=0 (never).
 const TRUST_PROXY_MODE = (process.env.TRUST_PROXY || 'auto').toLowerCase();
+// XFF is a chain "client, proxy1, proxy2": a proxy appends the address it saw
+// at the right end. Reading right-to-left by the number of trusted hops stops
+// a client-supplied fake XFF from overriding the real address. Default 1 hop
+// (one local reverse proxy); set 2+ for chained proxies / CDN + nginx.
+const TRUST_PROXY_HOPS = Math.min(16, Math.max(1, parseInt(process.env.TRUST_PROXY_HOPS || '1', 10) || 1));
+// Optional allow-list of proxy peers (comma-separated IPs or IPv4 CIDRs).
+// When set, 'auto' trusts ONLY these peers instead of any loopback/private IP.
+const TRUST_PROXY_IPS = (process.env.TRUST_PROXY_IPS || '').split(',').map((x) => x.trim()).filter(Boolean);
+// Optional preferred header, e.g. cf-connecting-ip behind Cloudflare.
+const CLIENT_IP_HEADER = (process.env.CLIENT_IP_HEADER || '').trim().toLowerCase();
+const IP_HEADERS = ['x-forwarded-for', 'x-real-ip', 'cf-connecting-ip', 'true-client-ip', 'x-client-ip', 'forwarded'];
+
+function normalizeIp(raw) {
+  if (typeof raw !== 'string') return null;
+  let a = raw.trim();
+  if (!a) return null;
+  a = a.replace(/^for=/i, '').trim().replace(/^"(.*)"$/, '$1').trim(); // RFC 7239 for="..."
+  const bracketed = /^\[([^\]]+)\](?::\d+)?$/.exec(a);
+  if (bracketed) a = bracketed[1];                                      // [2001:db8::1]:443
+  else if (/^[^:]+:\d+$/.test(a) && net.isIP(a.split(':')[0]) === 4) a = a.split(':')[0];
+  a = a.replace(/^::ffff:/i, '').replace(/%[A-Za-z0-9._-]+$/, '');     // IPv4-mapped / zone id
+  return net.isIP(a) ? a : null;
+}
+function ipInEntry(ip, entry) {
+  if (entry === ip) return true;
+  const m = /^(\d{1,3}(?:\.\d{1,3}){3})\/(\d{1,2})$/.exec(entry);
+  if (!m || net.isIP(ip) !== 4 || net.isIP(m[1]) !== 4) return false;
+  const bits = parseInt(m[2], 10);
+  if (bits < 0 || bits > 32) return false;
+  const toInt = (x) => x.split('.').reduce((n, v) => ((n << 8) | Number(v)) >>> 0, 0);
+  const mask = bits === 0 ? 0 : (0xffffffff << (32 - bits)) >>> 0;
+  return (toInt(ip) & mask) === (toInt(m[1]) & mask);
+}
 function isTrustedProxyPeer(remote) {
-  if (typeof remote !== 'string') return false;
-  let a = remote;
-  if (a.startsWith('::ffff:')) a = a.slice(7); // IPv4-mapped IPv6
+  const a = normalizeIp(remote);
+  if (!a) return false;
+  if (TRUST_PROXY_IPS.length) return TRUST_PROXY_IPS.some((e) => ipInEntry(a, e));
   if (a === '::1') return true;
   if (/^127\./.test(a)) return true;
   if (/^10\./.test(a)) return true;
   if (/^192\.168\./.test(a)) return true;
   if (/^172\.(1[6-9]|2\d|3[01])\./.test(a)) return true;
   if (/^169\.254\./.test(a)) return true;
-  if (/^f[cd][0-9a-f]{2}:/i.test(a)) return true; // fc00::/7 unique local
-  if (/^fe[89ab][0-9a-f]:/i.test(a)) return true; // fe80::/10 link local
+  if (/^f[cd][0-9a-f]{2}:/i.test(a)) return true;   // fc00::/7 unique local
+  if (/^fe[89ab][0-9a-f]:/i.test(a)) return true;   // fe80::/10 link local
   return false;
 }
-function resolveClientIp(remoteAddress, xff, mode) {
-  const remote = typeof remoteAddress === 'string' ? remoteAddress : null;
-  let trust;
-  if (mode === '1' || mode === 'true' || mode === 'always') trust = true;
-  else if (mode === '0' || mode === 'false' || mode === 'never') trust = false;
-  else trust = isTrustedProxyPeer(remote); // auto
-  if (trust && typeof xff === 'string' && xff) {
-    const first = xff.split(',')[0].trim();
-    if (first) return first;
+function proxyTrusted(peer, mode) {
+  if (mode === '1' || mode === 'true' || mode === 'always') return true;
+  if (mode === '0' || mode === 'false' || mode === 'never') return false;
+  return isTrustedProxyPeer(peer);
+}
+function forwardingChain(headers) {
+  const names = CLIENT_IP_HEADER
+    ? [CLIENT_IP_HEADER].concat(IP_HEADERS.filter((n) => n !== CLIENT_IP_HEADER))
+    : IP_HEADERS;
+  for (const name of names) {
+    const raw = headers && headers[name];
+    const v = Array.isArray(raw) ? raw.join(',') : raw;
+    if (typeof v !== 'string' || !v.trim()) continue;
+    let parts;
+    if (name === 'forwarded') {
+      parts = v.split(',').map((part) => {
+        const m = /\bfor\s*=\s*("[^"]+"|\[[^\]]+\]|[^;,\s]+)/i.exec(part);
+        return m ? m[1] : null;
+      });
+    } else if (name === 'x-forwarded-for') {
+      parts = v.split(',');
+    } else {
+      parts = [v];
+    }
+    const chain = parts.map(normalizeIp).filter(Boolean);
+    if (chain.length) return { name, chain, raw: v };
   }
-  return remote;
+  return null;
+}
+function pickClientIp(peer, headers, mode, hops) {
+  const trusted = proxyTrusted(peer, mode || TRUST_PROXY_MODE);
+  if (trusted) {
+    const f = forwardingChain(headers);
+    if (f) {
+      const idx = Math.max(0, f.chain.length - (hops || TRUST_PROXY_HOPS));
+      return { ip: f.chain[idx], source: f.name, trusted: true, headers: f.raw, chain: f.chain };
+    }
+  }
+  return { ip: normalizeIp(peer) || (typeof peer === 'string' ? peer : null), source: 'peer', trusted, headers: null, chain: [] };
+}
+// Kept exported with its original 3-arg signature for test/check-pages.js.
+function resolveClientIp(remoteAddress, xff, mode) {
+  return pickClientIp(remoteAddress, typeof xff === 'string' ? { 'x-forwarded-for': xff } : {}, mode, TRUST_PROXY_HOPS).ip;
 }
 function clientIp(req) {
-  return resolveClientIp(req.socket && req.socket.remoteAddress, req.headers['x-forwarded-for'], TRUST_PROXY_MODE);
+  return pickClientIp(req.socket && req.socket.remoteAddress, req.headers, TRUST_PROXY_MODE, TRUST_PROXY_HOPS).ip;
+}
+function ipDiagnostics(req) {
+  const peer = req.socket && req.socket.remoteAddress;
+  const r = pickClientIp(peer, req.headers, TRUST_PROXY_MODE, TRUST_PROXY_HOPS);
+  const seen = {};
+  for (const n of IP_HEADERS) {
+    const v = req.headers[n];
+    seen[n] = typeof v === 'string' ? v : null;
+  }
+  let hint;
+  if (r.source === 'peer' && !r.trusted) {
+    hint = '当前连接来源不被信任：设置 TRUST_PROXY=1，或用 TRUST_PROXY_IPS 指定反代 IP。';
+  } else if (r.source === 'peer') {
+    hint = '反代没有传递任何客户端 IP 头：请配置 X-Forwarded-For（Nginx: proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;）或 X-Real-IP。';
+  } else {
+    hint = '已获取到真实客户端 IP（来源：' + r.source + '）。';
+  }
+  return { ok: true, peer: peer || null, peer_normalized: normalizeIp(peer), resolved: r.ip, source: r.source,
+    proxy_trusted: r.trusted, trust_proxy_mode: TRUST_PROXY_MODE, trust_proxy_hops: TRUST_PROXY_HOPS,
+    chain: r.chain, headers: seen, hint };
 }
 
 // --- rate limiting (anti brute-force / anti abuse) -----------------------
@@ -395,7 +481,7 @@ function maskToken(t) {
   return t.slice(0, 6) + '…';
 }
 function adminShareInfo(s) {
-  return { id: s.id || null, token_masked: maskToken(s.token), user_id: s.user_id, created_at: s.created_at, expires_at: s.expires_at, enabled: s.enabled, access_count: s.access_count, last_ip: s.last_ip, last_user_agent: s.last_user_agent, last_access_at: s.last_access_at };
+  return { id: s.id || null, token_masked: maskToken(s.token), user_id: s.user_id, created_at: s.created_at, expires_at: s.expires_at, enabled: s.enabled, access_count: s.access_count, last_ip: normalizeIp(s.last_ip) || s.last_ip, last_user_agent: s.last_user_agent, last_access_at: s.last_access_at };
 }
 function findShareByRef(ref) {
   if (!ref) return null;
@@ -1216,8 +1302,7 @@ function publicBaseUrl(req) {
   // (e.g. javascript:) into subscription URLs and Surge managed-config lines.
   const xf = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim().toLowerCase();
   const peer = req.socket && req.socket.remoteAddress;
-  const trustXf = TRUST_PROXY_MODE === '1' || TRUST_PROXY_MODE === 'true' || TRUST_PROXY_MODE === 'always'
-    || (TRUST_PROXY_MODE !== '0' && TRUST_PROXY_MODE !== 'false' && TRUST_PROXY_MODE !== 'never' && isTrustedProxyPeer(peer));
+  const trustXf = proxyTrusted(peer, TRUST_PROXY_MODE);
   const proto = (trustXf && (xf === 'http' || xf === 'https')) ? xf : (req.socket && req.socket.encrypted ? 'https' : 'http');
   const host = validHost(req.headers.host) ? req.headers.host : ('127.0.0.1:' + PORT);
   return proto + '://' + host;
@@ -1628,6 +1713,7 @@ async function handleAdminApi(req, res) {
     try { return await readBody(req); } catch (e) { bodyStatus = e.status || 400; return null; }
   };
   const badBody = () => sendJson(res, bodyStatus, { ok: false, error: bodyStatus === 413 ? 'request body too large' : 'invalid JSON' });
+  if (req.method === 'GET' && p === '/api/admin/ip-check') return sendJson(res, 200, ipDiagnostics(req));
   // ---- Nodes ----
   if (req.method === 'GET' && p === '/api/admin/nodes') {
     const probe = await fetchProbe();
@@ -2007,13 +2093,18 @@ const ADMIN_HTML = `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8
 <div><label>节点命名规则</label><input id="setNameRule"></div>
 </div>
 <p class="muted" id="setSources"></p>
-<button type="button" id="btnSaveSettings">保存设置</button> <p id="setMsg" class="msg"></p></div>
+<button type="button" id="btnSaveSettings">保存设置</button> <p id="setMsg" class="msg"></p>
+<div class="section-head" style="margin-top:24px"><h2>反代 IP 诊断</h2></div>
+<p class="muted">检查反向代理是否把真实客户端 IP 传给了本服务；分享页的「最后 IP」依赖它。</p>
+<button type="button" class="ghost" id="btnIpCheck">检查来源 IP</button>
+<pre id="ipCheckOut" class="hidden"></pre></div>
 </div></div>
 <script>
 function applyTheme(t){document.documentElement.setAttribute("data-theme",t);var b=document.getElementById("btnTheme");if(b)b.textContent=t==="light"?"夜间模式":"白天模式";try{localStorage.setItem("emos-theme",t)}catch(e){}}
 document.getElementById("btnTheme").onclick=function(){applyTheme(document.documentElement.getAttribute("data-theme")==="light"?"dark":"light")};
 applyTheme(document.documentElement.getAttribute("data-theme")||"dark");
 var nodes=[],editingKey=null,adminSession=null;
+document.getElementById('btnIpCheck').onclick=async function(){var r=await api('GET','/api/admin/ip-check'),o=document.getElementById('ipCheckOut');o.classList.remove('hidden');o.textContent=JSON.stringify(r.json,null,2);};
 function esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;')}
 function fmtTime(t){return t?new Date(t).toLocaleString():'—'}
 async function api(method,path,body){
@@ -2373,5 +2464,5 @@ const HTML_RENDERED = HTML.split('{{VERSION}}').join(VERSION);
 const ADMIN_HTML_RENDERED = ADMIN_HTML.split('{{VERSION}}').join(VERSION);
 
 // Pure helpers exported for test/check-pages.js unit tests (no server started).
-module.exports = { server, monthEndExpireMs, normalizeExpiry, validateProbeId, parseHy2, parseVless, resolveClientIp, safeDecode, VERSION };
+module.exports = { server, monthEndExpireMs, normalizeExpiry, validateProbeId, parseHy2, parseVless, resolveClientIp, pickClientIp, normalizeIp, ipDiagnostics, safeDecode, VERSION };
 

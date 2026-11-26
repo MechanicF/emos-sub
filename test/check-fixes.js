@@ -161,6 +161,27 @@ const check = (name, cond, extra) => { if (cond) { console.log('OK   ' + name); 
   check('admin tables use data-act event delegation',
     !/onclick="(?:editNode|delNode|shareAct|shareDel)/.test(adminPage.body) && /data-act="edit"/.test(adminPage.body));
 
+  // 14. reverse proxy: the real client IP must reach the share access log
+  const g = await login('GGG');
+  const sharesOf = async (uid) => {
+    const r = json(await req(port, 'GET', '/api/admin/shares', ADMIN));
+    return (r.shares || []).find((s) => s.user_id === uid);
+  };
+  await sub(g.sub_token, { 'X-Forwarded-For': '203.0.113.77' });
+  check('XFF from a local reverse proxy is stored as last_ip',
+    (await sharesOf(g.user_id) || {}).last_ip === '203.0.113.77');
+  await sub(g.sub_token, { 'X-Real-IP': '203.0.113.88' });
+  check('X-Real-IP alone is stored as last_ip',
+    (await sharesOf(g.user_id) || {}).last_ip === '203.0.113.88');
+  await sub(g.sub_token, { 'X-Forwarded-For': '1.1.1.1, 203.0.113.99' });
+  check('forged XFF cannot spoof last_ip',
+    (await sharesOf(g.user_id) || {}).last_ip === '203.0.113.99');
+  check('ip-check requires admin auth', (await req(port, 'GET', '/api/admin/ip-check', {})).status === 401);
+  const diag = json(await req(port, 'GET', '/api/admin/ip-check', { ...ADMIN, 'X-Real-IP': '203.0.113.42' }));
+  check('ip-check reports the resolved client IP',
+    diag.ok === true && diag.resolved === '203.0.113.42' && diag.source === 'x-real-ip',
+    JSON.stringify(diag).slice(0, 160));
+
   lib.server.close(); mockEmos.close(); mockProbe.close();
   try { fs.rmSync(tmp, { recursive: true, force: true }); } catch (e) { /* noop */ }
   console.log('\ncheck-fixes: ' + pass + ' passed, ' + fail + ' failed');
