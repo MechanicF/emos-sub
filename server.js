@@ -1,4 +1,4 @@
-// EMOS-gated sing-box gateway v1.5.0 — zero dependencies.
+// EMOS-gated sing-box gateway v1.5.1 — zero dependencies.
 // Node >= 18 (uses global fetch). Run: node server.js  (PORT env, default 3000)
 // Scope: EMOS login -> carrot > 500 -> console (nodes + per-user sub links)
 // + NODE TOTAL traffic only, from https://1e.lol/api/nodes. NO per-user traffic.
@@ -19,7 +19,7 @@ const path = require('path');
 const crypto = require('crypto');
 
 const PORT = parseInt(process.env.PORT || '3000', 10);
-const VERSION = '1.5.0';
+const VERSION = '1.5.1';
 const CONFIG_PATH = path.join(__dirname, 'config', 'nodes.json');
 const CLASH_TEMPLATE_PATH = path.join(__dirname, 'config', 'templates', 'clash.yaml');
 const SINGBOX_TEMPLATE_PATH = path.join(__dirname, 'config', 'templates', 'singbox.json');
@@ -1171,7 +1171,7 @@ async function handleAuth(req, res) {
 
   const carrot = result.carrot;
   if (!(carrot > CARROT_THRESHOLD)) {
-    return sendJson(res, 200, { ok: false, gated: false, user_id: result.user_id, username: result.username, carrot, threshold: CARROT_THRESHOLD, shortfall: CARROT_THRESHOLD + 1 - carrot, reason: 'carrot<=500' });
+    return sendJson(res, 200, { ok: false, gated: false, user_id: result.user_id, username: result.username, carrot, threshold: CARROT_THRESHOLD, shortfall: CARROT_THRESHOLD + 1 - carrot, reason: 'carrot_insufficient' });
   }
   const issued = issueUserSession(req, result, token, demo);
   const sessionId = issued.sessionId;
@@ -1211,6 +1211,7 @@ async function handleEmosCallback(req, res) {
   const fail = (code, carrot) => {
     let loc = '/?emos_error=' + code;
     if (typeof carrot === 'number') loc += '&carrot=' + carrot;
+    if (code === 'carrot_insufficient') loc += '&threshold=' + CARROT_THRESHOLD;
     res.writeHead(302, { Location: loc, 'Cache-Control': 'no-store' });
     res.end();
   };
@@ -1279,7 +1280,7 @@ async function handleSubRefresh(req, res) {
   // EMOS check. (Re-login does the same check; refresh is no cheaper.)
   if (sess.emosToken && Date.now() - sess.lastCarrotCheck > CARROT_RECHECK_MS) {
     const verdict = await recheckCarrot(s.sid, sess);
-    if (verdict === 'revoked') return sendJson(res, 403, { ok: false, error: 'carrot dropped below 500 (or EMOS token invalid) — please log in again' });
+    if (verdict === 'revoked') return sendJson(res, 403, { ok: false, error: 'carrot dropped below ' + CARROT_THRESHOLD + ' (or EMOS token invalid) — please log in again' });
     if (!sessions.get(s.sid)) return sendJson(res, 401, { ok: false, error: 'session ended — please log in again' });
   }
   const old = shares.get(s.shareToken);
@@ -1346,7 +1347,7 @@ async function resolveShare(req, res, token) {
   // Re-check carrot for real EMOS sessions (cached 10 min). Demo sessions skip.
   if (sess.emosToken && Date.now() - sess.lastCarrotCheck > CARROT_RECHECK_MS) {
     const verdict = await recheckCarrot(share.sessionId, sess);
-    if (verdict === 'revoked') { sendJson(res, 403, { ok: false, error: 'carrot dropped below 500 (or EMOS token invalid) — subscription revoked, please log in again' }); return null; }
+    if (verdict === 'revoked') { sendJson(res, 403, { ok: false, error: 'carrot dropped below ' + CARROT_THRESHOLD + ' (or EMOS token invalid) — subscription revoked, please log in again' }); return null; }
     // 'ok' or 'stale': serve this request.
   }
   // Access log (sublinkPro per-link access count + IP logs).
@@ -1380,7 +1381,7 @@ async function serveSubscription(req, res, token) {
     const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
     const page = '<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>订阅 · EMOS-gated</title>'
       + '<style>body{margin:0;padding:28px 20px 48px;min-height:100vh;color:#eef2f8;font-family:system-ui,-apple-system,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;font-size:15px;line-height:1.6;background:linear-gradient(rgba(255,255,255,.022) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,.022) 1px,transparent 1px),radial-gradient(1000px 520px at 10% -10%,rgba(99,102,241,.32),transparent 60%),radial-gradient(820px 500px at 95% -5%,rgba(34,211,238,.16),transparent 55%),radial-gradient(720px 520px at 50% 115%,rgba(139,92,246,.14),transparent 60%),linear-gradient(180deg,#080c16,#070a12);background-size:44px 44px,44px 44px,auto,auto,auto,auto}.wrap{max-width:640px;margin:0 auto}.card{background:rgba(255,255,255,.045);border:1px solid rgba(255,255,255,.09);border-radius:20px;padding:20px 22px;margin:14px 0;box-shadow:0 16px 40px rgba(0,0,0,.42)}h1{font-size:23px;font-weight:800;letter-spacing:-.01em;margin:0 0 6px}h2{font-size:13px;letter-spacing:.1em;text-transform:uppercase;color:#94a3b8;margin:0 0 8px}a{color:#93c5fd;text-decoration:none}a:hover{text-decoration:underline}code{word-break:break-all;background:rgba(0,0,0,.4);padding:2px 7px;border-radius:6px;font-size:13px}.muted{color:#94a3b8;font-size:13px}</style></head><body><div class="wrap">'
-      + '<h1>订阅链接</h1><p class="muted">专属订阅地址，萝卜 ≤ 500 即失效。请在客户端里粘贴这条链接，不要用浏览器直接下载。</p>'
+      + '<h1>订阅链接</h1><p class="muted">专属订阅地址，萝卜 ≤ ' + CARROT_THRESHOLD + ' 即失效。请在客户端里粘贴这条链接，不要用浏览器直接下载。</p>'
       + '<div class="card"><h2>订阅链接（按客户端自动识别）</h2><p><a href="' + esc(urls.c_url) + '">' + esc(urls.c_url) + '</a></p><p><a href="' + esc(urls.import_url) + '">一键导入</a></p></div>'
       + '<p class="muted">同一条链接，FlClash / Clash Verge 返回 Clash，sing-box / Hiddify / Karing 返回 JSON，Surge 返回 Surge 配置，Shadowrocket、Loon 等返回通用链接列表。Subscription-Userinfo 为节点总流量，不是个人用量；到期时间为本月底 23:59。</p>'
       + '</div></body></html>';
@@ -2009,7 +2010,7 @@ code{word-break:break-all;background:rgba(0,0,0,.4);padding:2px 7px;border-radiu
 .msg{font-size:13px;color:var(--muted);margin:10px 0 0;min-height:18px}
 @media (max-width:640px){body{padding:18px 12px 36px}.card{padding:16px}.stat{min-width:calc(50% - 6px)}.sub-row{flex-wrap:wrap}.sub-row .lbl{width:100%}.sub-row code{white-space:normal}.topbar{flex-wrap:nowrap}.topbar h1{font-size:19px}.brand-mark{width:38px;height:38px;border-radius:11px}.topbar .pill{display:none}.topbar #btnTheme{margin-left:auto}.node-table{overflow:visible;margin:0;padding:0}.node-table thead{display:none}.node-table table,.node-table tbody,.node-table tr,.node-table td{display:block;width:100%}.node-table tr{border:1px solid var(--border);border-radius:14px;padding:4px 14px;margin:12px 0;background:var(--card-solid)}.node-table td{border-bottom:1px solid var(--border);padding:10px 0}.node-table td:last-child{border-bottom:0}.node-table td[data-label]:not([data-label=""])::before{content:attr(data-label);display:block;font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);margin-bottom:2px}}
 </style></head><body><div class="wrap">
-<div class="topbar"><div class="brand-mark"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 4 14h6l-1 8 9-12h-6l1-8z"/></svg></div><div><h1>EMOS 订阅控制台</h1><p class="subtitle">EMOS 登录 · 萝卜 &gt; 500 解锁订阅</p></div><span class="pill accent" style="margin-left:auto">{{VERSION}}</span><button type="button" class="ghost" id="btnTheme" style="margin:0 0 0 8px">白天模式</button></div>
+<div class="topbar"><div class="brand-mark"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 4 14h6l-1 8 9-12h-6l1-8z"/></svg></div><div><h1>EMOS 订阅控制台</h1><p class="subtitle">EMOS 登录 · 萝卜 &gt; <span class="th">500</span> 解锁订阅</p></div><span class="pill accent" style="margin-left:auto">{{VERSION}}</span><button type="button" class="ghost" id="btnTheme" style="margin:0 0 0 8px">白天模式</button></div>
 
 <div class="card hero" id="loginCard"><h2>登录</h2>
 <p class="muted">用你的 EMOS 账号登录，核验萝卜后进入控制台</p>
@@ -2021,16 +2022,16 @@ code{word-break:break-all;background:rgba(0,0,0,.4);padding:2px 7px;border-radiu
 </div>
 <p id="loginMsg" class="msg"></p></div>
 
-<div class="card warn-card hidden" id="gatedCard"><h2>未达标</h2><div id="gatedMsg"></div><p class="muted">萝卜 &gt; 500 才能看到节点和订阅链接。去 EMOS 签到 / 赚萝卜后再来。</p></div>
+<div class="card warn-card hidden" id="gatedCard"><h2>未达标</h2><div id="gatedMsg"></div><p class="muted">萝卜 &gt; <span class="th">500</span> 才能看到节点和订阅链接。去 EMOS 签到 / 赚萝卜后再来。</p></div>
 
 <div class="hidden" id="dash">
 <div class="stats">
-<div class="stat"><div class="k">萝卜</div><div class="v" id="statCarrot">—</div><div class="s">门槛 &gt; 500</div></div>
+<div class="stat"><div class="k">萝卜</div><div class="v" id="statCarrot">—</div><div class="s">门槛 &gt; <span class="th">500</span></div></div>
 <div class="stat"><div class="k">节点</div><div class="v" id="statNodes">—</div><div class="s">订阅内容</div></div>
 <div class="stat"><div class="k">订阅访问</div><div class="v" id="statAccess">—</div><div class="s">本条链接</div></div>
 </div>
 <div class="card"><h2>节点 · 总流量</h2><div class="table-scroll node-table"><table><thead><tr><th>节点</th><th>到期</th><th>状态</th><th>今日</th><th>本月已用 / 限额</th></tr></thead><tbody id="nodeRows"></tbody></table></div></div>
-<div class="card"><h2>已达标</h2><p>用户：<code id="who"></code> · 萝卜：<b id="carrotOut"></b>（门槛 &gt; 500）</p>
+<div class="card"><h2>已达标</h2><p>用户：<code id="who"></code> · 萝卜：<b id="carrotOut"></b>（门槛 &gt; <span class="th">500</span>）</p>
 <p class="muted">订阅链接（每人专属，粘贴到客户端即可）：</p>
 <div class="sub-row"><span class="lbl">订阅链接</span><code id="subAuto"></code><button type="button" id="btnCopyAuto">复制</button></div>
 <p class="muted">一条链接全客户端通用，服务端按客户端自动识别格式（FlClash / Clash Verge 返回 Clash，sing-box / Hiddify / Karing 返回 JSON，Surge 返回 Surge 配置，Shadowrocket、Loon 等返回通用链接列表）。</p>
@@ -2053,6 +2054,9 @@ function setShareInfo(sh){
   document.getElementById("shareInfo").textContent="订阅链接：创建于 "+new Date(sh.created_at).toLocaleString()+(sh.expires_at?"，到期 "+new Date(sh.expires_at).toLocaleString():"，永不过期")+"，已访问 "+(sh.access_count||0)+" 次"+(sh.last_access_at?"，上次访问 "+new Date(sh.last_access_at).toLocaleString():"");
   var sa=document.getElementById("statAccess");if(sa)sa.textContent=sh.access_count||0;
 }
+var gateThreshold=500;
+function applyThreshold(t){gateThreshold=t;var i,a=document.querySelectorAll(".th");for(i=0;i<a.length;i++)a[i].textContent=t;}
+fetch("/api/public-settings").then(function(r){return r.json();}).then(function(j){if(j&&typeof j.carrot_threshold==="number")applyThreshold(j.carrot_threshold);}).catch(function(){});
 async function doAuth(body){
   showMsg("核验中…");
   var r;
@@ -2060,10 +2064,10 @@ async function doAuth(body){
   catch(e){showMsg("登录失败：网络错误，"+e.message);return;}
   var j=await r.json();
   if(!j.ok){
-    if(j.reason==="carrot<=500"){
+    if(j.reason==="carrot_insufficient"){
       document.getElementById("gatedCard").classList.remove("hidden");
       document.getElementById("dash").classList.add("hidden");
-      document.getElementById("gatedMsg").innerHTML="萝卜：<b>"+j.carrot+"</b><div class=\\"big-num bad\\">还差 "+j.shortfall+"</div>才到 501（&gt; 500）。";
+      document.getElementById("gatedMsg").innerHTML="萝卜：<b>"+j.carrot+"</b><div class=\\"big-num bad\\">还差 "+j.shortfall+"</div>才到 "+(j.threshold+1)+"（&gt; "+j.threshold+"）。";
       showMsg("未达标：萝卜 "+j.carrot+"，还差 "+j.shortfall+"。");
     }else{showMsg("登录失败：" + (j.error||"未知错误"))}
     return;
@@ -2103,7 +2107,7 @@ document.getElementById("btnDisable").onclick=async function(){if(!confirm("停�
 document.getElementById("btnImport").onclick=function(){if(importUrl)window.location.href=importUrl};
 document.getElementById("btnRefresh").onclick=function(){loadNodes()};
 document.getElementById("btnLogout").onclick=async function(){try{await fetch("/api/logout",{method:"POST",credentials:"include",headers:session?{"X-Session":session}:{}});}catch(e){}session=null;subUrls=null;importUrl="";document.getElementById("dash").classList.add("hidden");document.getElementById("gatedCard").classList.add("hidden");document.getElementById("loginCard").classList.remove("hidden");showMsg("已退出登录。")};
-(function(){var q=new URLSearchParams(location.search);var e=q.get("emos_error");if(!e)return;var c=q.get("carrot");var m={no_token:"EMOS 回跳里没有带 token，请重新点“用 EMOS 账号登录”再试一次。",bad_state:"登录状态不对（uuid 不匹配或已过期），请重新点“用 EMOS 账号登录”。",not_signed_in:"EMOS 未确认这次登录（sign/check 未通过：可能是 token 无效，或今天还没在 EMOS 签到），请在 EMOS 登录/签到后再试。",carrot_insufficient:"萝卜不够：当前 "+(c||"?")+"，还差 "+(c?Math.max(0,501-c):"?")+" 才到 501（> 500）。"};showMsg(m[e]||("登录失败："+e));history.replaceState(null,"",location.pathname);})();
+(function(){var q=new URLSearchParams(location.search);var e=q.get("emos_error");if(!e)return;var c=q.get("carrot");var t=parseInt(q.get("threshold"),10)||gateThreshold;var m={no_token:"EMOS 回跳里没有带 token，请重新点“用 EMOS 账号登录”再试一次。",bad_state:"登录状态不对（uuid 不匹配或已过期），请重新点“用 EMOS 账号登录”。",not_signed_in:"EMOS 未确认这次登录（sign/check 未通过：可能是 token 无效，或今天还没在 EMOS 签到），请在 EMOS 登录/签到后再试。",carrot_insufficient:"萝卜不够：当前 "+(c||"?")+"，还差 "+(c?Math.max(0,t+1-c):"?")+" 才到 "+(t+1)+"（> "+t+"）。"};showMsg(m[e]||("登录失败："+e));history.replaceState(null,"",location.pathname);})();
 async function tryResume(){
   try{
     var r=await fetch("/api/nodes",{credentials:"include"});
@@ -2142,6 +2146,8 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && u.pathname === '/api/admin/login') return await handleAdminLogin(req, res);
     if (req.method === 'POST' && u.pathname === '/api/admin/logout') return await handleAdminLogout(req, res);
     if (u.pathname.startsWith('/api/admin/')) return await handleAdminApi(req, res);
+    // Public: the carrot threshold is display info (the console subtitle shows it), so no auth needed.
+    if (req.method === 'GET' && u.pathname === '/api/public-settings') return sendJson(res, 200, { ok: true, carrot_threshold: CARROT_THRESHOLD });
     if (req.method === 'POST' && u.pathname === '/api/auth') return await handleAuth(req, res);
     if (req.method === 'GET' && u.pathname === '/auth/emos') return handleEmosLogin(req, res);
     if (req.method === 'GET' && u.pathname === '/auth/emos/callback') return await handleEmosCallback(req, res);

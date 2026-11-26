@@ -63,6 +63,7 @@ function reqRaw(port, method, p, headers, body) {
 }
 const get = (port, p, headers) => reqRaw(port, 'GET', p, headers).then((r) => r.body);
 const postJson = (port, p, body, headers) => reqRaw(port, 'POST', p, headers, body).then((r) => JSON.parse(r.body));
+const putJson = (port, p, body, headers) => reqRaw(port, 'PUT', p, headers, body).then((r) => JSON.parse(r.body));
 const getUA = (port, p, ua, headers) => reqRaw(port, 'GET', p, { 'User-Agent': ua, ...headers }).then((r) => r.body);
 
 function spawnServer(cwd, port, extraEnv) {
@@ -191,6 +192,25 @@ const srv = spawnServer(REPO, PORT, { EMOS_STATE_FILE: stateFile('main') });
     const newNodes = await reqRaw(PORT, 'GET', '/api/nodes', { 'X-Session': auth2.session });
     if (oldNodes.status !== 401 || newNodes.status !== 200) fail('second login did not revoke the first session (old=' + oldNodes.status + ' new=' + newNodes.status + ')');
     else ok('second login revokes the first session (old 401, new 200)');
+    // Admin threshold change reaches the frontend (v1.5.1): before this the
+    // console hardcoded 500 everywhere, so after raising the threshold the
+    // gate message read "还差 0 才到 501 (> 500)" for a user with 1000 carrots.
+    const setTh = await putJson(PORT, '/api/admin/settings', { carrot_threshold: 1500 }, { 'X-Admin-Token': 'test-token' });
+    if (!setTh.ok || setTh.settings.carrot_threshold !== 1500) fail('admin could not set carrot_threshold to 1500: ' + JSON.stringify(setTh));
+    else ok('admin sets carrot_threshold to 1500');
+    const pub = JSON.parse(await get(PORT, '/api/public-settings'));
+    if (!pub.ok || pub.carrot_threshold !== 1500) fail('/api/public-settings did not return the new threshold');
+    else ok('/api/public-settings returns the live threshold (1500)');
+    const gated1000 = await postJson(PORT, '/api/auth', { carrot: 1000 });
+    if (gated1000.ok || gated1000.reason !== 'carrot_insufficient' || gated1000.threshold !== 1500 || gated1000.shortfall !== 501) fail('gated login did not report the live threshold: ' + JSON.stringify(gated1000));
+    else ok('gated login reports live threshold (1500) and shortfall (501) for carrot 1000');
+    const consoleHtml2 = await get(PORT, '/');
+    if (consoleHtml2.includes('501（> 500）') || consoleHtml2.includes('501-c') || consoleHtml2.includes('carrot<=500') || !consoleHtml2.includes('j.threshold') || !consoleHtml2.includes('gateThreshold') || !consoleHtml2.includes('class="th"')) {
+      fail('console still hardcodes the 500 threshold');
+    } else ok('console uses the live threshold (no hardcoded 501/500 in gate messages)');
+    const restoreTh = await putJson(PORT, '/api/admin/settings', { carrot_threshold: 500 }, { 'X-Admin-Token': 'test-token' });
+    if (!restoreTh.ok || restoreTh.settings.carrot_threshold !== 500) fail('could not restore carrot_threshold to 500');
+    else ok('threshold restored to 500');
   } catch (e) { console.error('FAIL', e.message); code = 1; }
   srv.kill();
 
@@ -299,6 +319,31 @@ const srv = spawnServer(REPO, PORT, { EMOS_STATE_FILE: stateFile('main') });
       const back = await reqRaw(GPORT, 'GET', '/c/?token=' + encodeURIComponent(login2.sub_token), { 'User-Agent': 'sing-box/1.12.0' });
       if (back.status !== 200) fail('subscription did not work after re-login, got ' + back.status);
       else ok('re-login after carrot recovery works again');
+    }
+    // The /link callback redirect carries the live threshold (v1.5.1), so the
+    // "not enough carrots" message on / shows the real numbers, not 501/500.
+    const setThG = await putJson(GPORT, '/api/admin/settings', { carrot_threshold: 1500 }, { 'X-Admin-Token': 'test-token' });
+    if (!setThG.ok) fail('gate server: could not set threshold to 1500');
+    else {
+      mockCarrot = 1000;
+      const linkRes = await reqRaw(GPORT, 'GET', '/auth/emos', {});
+      const linkLoc = linkRes.headers.location || '';
+      const mu = /uuid=([0-9a-f-]+)/.exec(linkLoc);
+      if (linkRes.status !== 302 || !mu) fail('/auth/emos did not issue a login uuid, got ' + linkRes.status + ' ' + linkLoc);
+      else {
+        const cb = await reqRaw(GPORT, 'GET', '/auth/emos/callback?token=fake-emos-token&uuid=' + mu[1], {});
+        const cbLoc = cb.headers.location || '';
+        if (cb.status !== 302 || cbLoc !== '/?emos_error=carrot_insufficient&carrot=1000&threshold=1500') fail('callback redirect should carry carrot=1000&threshold=1500, got ' + cb.status + ' ' + cbLoc);
+        else ok('callback redirect carries the live threshold (carrot=1000&threshold=1500)');
+      }
+      mockCarrot = 600;
+      const restoreThG = await putJson(GPORT, '/api/admin/settings', { carrot_threshold: 500 }, { 'X-Admin-Token': 'test-token' });
+      if (!restoreThG.ok) fail('gate server: could not restore threshold to 500');
+      else {
+        const login3 = await postJson(GPORT, '/api/auth', { token: 'fake-emos-token' });
+        if (!login3.ok) fail('login after threshold restore failed');
+        else ok('login works again after threshold restore');
+      }
     }
     gsrv.kill();
   } catch (e) { console.error('FAIL mock-EMOS tests:', e.message); code = 1; }
