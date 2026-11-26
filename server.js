@@ -1,4 +1,4 @@
-// EMOS-gated sing-box gateway v1.4.2 — zero dependencies.
+// EMOS-gated sing-box gateway v1.4.3 — zero dependencies.
 // Node >= 18 (uses global fetch). Run: node server.js  (PORT env, default 3000)
 // Scope: EMOS login -> carrot > 500 -> console (nodes + per-user sub links)
 // + NODE TOTAL traffic only, from https://1e.lol/api/nodes. NO per-user traffic.
@@ -19,7 +19,7 @@ const path = require('path');
 const crypto = require('crypto');
 
 const PORT = parseInt(process.env.PORT || '3000', 10);
-const VERSION = '1.4.2';
+const VERSION = '1.4.3';
 const CONFIG_PATH = path.join(__dirname, 'config', 'nodes.json');
 const CLASH_TEMPLATE_PATH = path.join(__dirname, 'config', 'templates', 'clash.yaml');
 const SINGBOX_TEMPLATE_PATH = path.join(__dirname, 'config', 'templates', 'singbox.json');
@@ -1654,7 +1654,7 @@ pre{background:rgba(0,0,0,.4);border:1px solid var(--border);border-radius:10px;
 .msg{font-size:13px;color:var(--muted);margin:8px 0 0;min-height:18px}
 .msg.err{color:var(--red)} .msg.ok{color:var(--green)}
 .section-head{display:flex;align-items:baseline;justify-content:space-between;gap:10px;flex-wrap:wrap}
-@media (max-width:640px){body{padding:18px 12px 36px}.card{padding:16px}.form-grid{grid-template-columns:1fr}.stat{min-width:calc(50% - 6px)}}
+@media (max-width:640px){body{padding:18px 12px 36px}.card{padding:16px}.form-grid{grid-template-columns:1fr}.stat{min-width:calc(50% - 6px)}.topbar{flex-wrap:nowrap}.topbar h1{font-size:19px}.brand-mark{width:38px;height:38px;border-radius:11px}.topbar .pill{display:none}.topbar #btnTheme{margin-left:auto}}
 </style></head><body><div class="wrap">
 <div class="topbar"><div class="brand-mark"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 3 7v6c0 5 4 8 9 9 5-1 9-4 9-9V7l-9-5z"/><path d="M9 12l2 2 4-4"/></svg></div><div><h1>后台管理</h1><p class="subtitle">EMOS 订阅网关 · 只有站长能进</p></div><span class="pill accent" style="margin-left:auto">站长后台 · {{VERSION}}</span><button type="button" class="ghost" id="btnTheme" style="margin:0 0 0 8px">白天模式</button></div>
 <p class="muted">管理节点、分享链接与设置，改动立即生效。</p>
@@ -1937,7 +1937,7 @@ code{word-break:break-all;background:rgba(0,0,0,.4);padding:2px 7px;border-radiu
 .big-num{font-size:34px;font-weight:800;line-height:1.1;margin:6px 0}
 .actions{display:flex;flex-wrap:wrap;gap:2px;margin-top:12px}
 .msg{font-size:13px;color:var(--muted);margin:10px 0 0;min-height:18px}
-@media (max-width:640px){body{padding:18px 12px 36px}.card{padding:16px}.stat{min-width:calc(50% - 6px)}.sub-row{flex-wrap:wrap}.sub-row .lbl{width:100%}.sub-row code{white-space:normal}}
+@media (max-width:640px){body{padding:18px 12px 36px}.card{padding:16px}.stat{min-width:calc(50% - 6px)}.sub-row{flex-wrap:wrap}.sub-row .lbl{width:100%}.sub-row code{white-space:normal}.topbar{flex-wrap:nowrap}.topbar h1{font-size:19px}.brand-mark{width:38px;height:38px;border-radius:11px}.topbar .pill{display:none}.topbar #btnTheme{margin-left:auto}.node-table{overflow:visible;margin:0;padding:0}.node-table thead{display:none}.node-table table,.node-table tbody,.node-table tr,.node-table td{display:block;width:100%}.node-table tr{border:1px solid var(--border);border-radius:14px;padding:4px 14px;margin:12px 0;background:var(--card-solid)}.node-table td{border-bottom:1px solid var(--border);padding:10px 0}.node-table td:last-child{border-bottom:0}.node-table td[data-label]:not([data-label=""])::before{content:attr(data-label);display:block;font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);margin-bottom:2px}}
 </style></head><body><div class="wrap">
 <div class="topbar"><div class="brand-mark"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 4 14h6l-1 8 9-12h-6l1-8z"/></svg></div><div><h1>EMOS 订阅控制台</h1><p class="subtitle">EMOS 登录 · 萝卜 &gt; 500 解锁订阅</p></div><span class="pill accent" style="margin-left:auto">{{VERSION}}</span><button type="button" class="ghost" id="btnTheme" style="margin:0 0 0 8px">白天模式</button></div>
 <p class="muted">萝卜 &gt; 500 才能进入控制台；节点流量为探针整机总流量。</p>
@@ -1958,9 +1958,10 @@ code{word-break:break-all;background:rgba(0,0,0,.4);padding:2px 7px;border-radiu
 <div class="stats">
 <div class="stat"><div class="k">萝卜</div><div class="v" id="statCarrot">—</div><div class="s">门槛 &gt; 500</div></div>
 <div class="stat"><div class="k">节点</div><div class="v" id="statNodes">—</div><div class="s">订阅内容</div></div>
+<div class="stat"><div class="k">总流量</div><div class="v" id="statTotalTraffic">—</div><div class="s">本月合计</div></div>
 <div class="stat"><div class="k">订阅访问</div><div class="v" id="statAccess">—</div><div class="s">本条链接</div></div>
 </div>
-<div class="card"><h2>节点 · 总流量</h2><div class="table-scroll"><table><thead><tr><th>节点</th><th>到期</th><th>状态</th><th>今日</th><th>本月已用 / 限额</th></tr></thead><tbody id="nodeRows"></tbody></table></div></div>
+<div class="card"><h2>节点 · 总流量</h2><div class="table-scroll node-table"><table><thead><tr><th>节点</th><th>到期</th><th>状态</th><th>今日</th><th>本月已用 / 限额</th></tr></thead><tbody id="nodeRows"></tbody></table></div></div>
 <div class="card"><h2>已达标</h2><p>用户：<code id="who"></code> · 萝卜：<b id="carrotOut"></b>（门槛 &gt; 500）</p>
 <p class="muted">订阅链接（每人专属，粘贴到客户端即可）：</p>
 <div class="sub-row"><span class="lbl">订阅链接</span><code id="subAuto"></code><button type="button" id="btnCopyAuto">复制</button></div>
@@ -2018,12 +2019,15 @@ async function loadNodes(){
   var j=await r.json();
   if(!j.ok){showMsg("拉取节点失败：" + (j.error||""));return}
   document.getElementById("statNodes").textContent=j.nodes.length;
+  var anyTraffic=j.nodes.some(function(n){return typeof n.month_used==="number";});
+  var totalMonth=j.nodes.reduce(function(s,n){return s+(typeof n.month_used==="number"?n.month_used:0);},0);
+  document.getElementById("statTotalTraffic").textContent=anyTraffic?fmt(totalMonth):"—";
   var html="";
   j.nodes.forEach(function(n){
     var pct=n.pct_used==null?"—":n.pct_used+"%";
     var bar=n.pct_used==null?"":"<div class=\\"bar\\"><i style=\\"width:"+Math.min(100,n.pct_used)+"\\"></i></div>";
     var pill=n.online===true?'<span class="pill ok">在线</span>':n.online===false?'<span class="pill bad">离线</span>':'<span class="pill">未知 · 不在探针里</span>';
-    html+="<tr><td><b>"+esc(n.name)+"</b></td><td>"+fmtExpiry(n.expires_at)+"</td><td>"+pill+"</td><td>"+fmt(n.day_used)+"</td><td>"+fmt(n.month_used)+" / "+(n.traffic_limit?fmt(n.traffic_limit):"不限")+"<br><span class=\\"muted\\">已用 "+pct+" · 剩余 "+(n.remaining==null?"—":fmt(n.remaining))+"</span>"+bar+"</td></tr>";
+    html+="<tr><td data-label=\\"\\"><b>"+esc(n.name)+"</b></td><td data-label=\\"到期\\">"+fmtExpiry(n.expires_at)+"</td><td data-label=\\"状态\\">"+pill+"</td><td data-label=\\"今日\\">"+fmt(n.day_used)+"</td><td data-label=\\"本月已用 / 限额\\">"+fmt(n.month_used)+" / "+(n.traffic_limit?fmt(n.traffic_limit):"不限")+"<br><span class=\\"muted\\">已用 "+pct+" · 剩余 "+(n.remaining==null?"—":fmt(n.remaining))+"</span>"+bar+"</td></tr>";
   });
   document.getElementById("nodeRows").innerHTML=html||"<tr><td colspan=\\"5\\">暂无节点</td></tr>";
 }
