@@ -2,7 +2,7 @@
 
 EMOS 登录核验萝卜余额，超过 500 才能进入控制台、领取专属订阅链接。节点流量取自 1e.lol 探针的整机总流量，不做每人用量统计。
 
-当前版本：**v1.0.0**（2026-11-26）
+当前版本：**v1.1.0**（2026-11-26）
 
 零依赖 Node.js（Node ≥ 18），不用 `npm install`。
 
@@ -25,7 +25,7 @@ PORT=3000 ADMIN_TOKEN=你的口令 node server.js
 ```bash
 cd emos-sub            # 或安装目录 /opt/emos-sub
 ./manage.sh update     # 备份配置 → 拉取最新代码 → 重启
-./manage.sh status     # 查看程序版本（v1.0.0）、git 提交、运行状态、端口、健康检查
+./manage.sh status     # 查看程序版本（v1.1.0）、git 提交、运行状态、端口、健康检查
 ```
 
 `update` 只更新代码文件（`server.js`、`manage.sh`、`start.sh`、模板），`.env` 和 `config/`（节点、设置）原样保留，更新前自动备份到 `backups/`。
@@ -102,6 +102,10 @@ curl -fsSL https://raw.githubusercontent.com/MechanicF/emos-sub/main/manage.sh -
 
 支持 `hy2://`、`hysteria2://`、`vless://`（含 REALITY 与 VLESS Encryption）。命名规则默认 `[$Flag] $LinkCountryName - $Name`，重名自动加序号。
 
+**Clash 分流（ACL4SSR AdblockPlus）：** Clash 输出用的就是 ACL4SSR 的 `ACL4SSR_AdblockPlus.ini` 那套规则。注意这个 `.ini` 本身不是 Clash YAML 模板，是 Sub-Store/ACL 定义（`ruleset=<分组>,<规则列表>` + `custom_proxy_group=`）；服务端按它合并生成 Clash 配置：15 个规则列表（去广告、应用净化、微软、苹果、国外媒体、电报、国内直连等）变成 `rule-providers`（客户端从 `raw.githubusercontent.com/ACL4SSR/ACL4SSR` 拉取，每天更新一次），分组沿用 `.ini` 里的名字和顺序（🚀 节点选择、♻️ 自动选择、🌍 国外媒体、📲 电报信息、Ⓜ️ 微软服务、🍎 苹果服务、🎯 全球直连、🛑 全球拦截、🍃 应用净化、🆎 AdBlock、🐟 漏网之鱼），最后 `GEOIP,CN` 直连、`MATCH` 走漏网之鱼。模板文件在 `config/templates/clash.yaml`（占位 `{{PROXIES}}` `{{GROUPS}}` `{{RULE_PROVIDERS}}` `{{RULES}}`），删掉会回退到 `server.js` 里的内置模板。
+
+**FlClash 没节点时先查这三点：** ① 必须用控制台里“Clash / mihomo / Verge”那条链接（`/c/?token=...&client=clash`），sing-box JSON、通用链接（纯文本链接列表）FlClash 读不了；② 链接里的 token 有效期 24 小时，过期或在控制台点了“刷新订阅链接”后旧链接立即失效，重新登录拿新的；③ 服务器端口要在防火墙放行，浏览器能打开订阅地址并看到 YAML 才算通。已用 mihomo v1.19.34（FlClash 同款核心）`mihomo -t` 验过实发 Clash 配置：2 个节点（VLESS REALITY + hy2）+ 11 个分组 + 15 个 rule-providers + 17 条规则全部通过；`GEOIP,CN` 需要客户端自带 GeoIP 数据库（FlClash 自带）。
+
 响应头带节点总流量的 `Subscription-Userinfo`（到期时间为本月底 23:59），`Cache-Control: private, no-store`；Clash 另带 `profile-update-interval: 24`。反代须透传 User-Agent。
 
 **流量说明：** 探针返回的是整台服务器的网卡总流量，无法拆分到单条节点或单人；控制台只做节点总流量，不做每人用量。探针拉取失败时用内置样本值兜底并在页面注明。
@@ -122,6 +126,12 @@ curl -fsSL https://raw.githubusercontent.com/MechanicF/emos-sub/main/manage.sh -
 
 ## 版本历史
 
+### v1.1.0 — 2026-11-26
+
+- Clash 输出改用 ACL4SSR AdblockPlus 规则（15 个 rule-providers + 11 个分组 + `GEOIP,CN` + `MATCH`，分组与 `.ini` 同名同序）
+- 修复 FlClash 加订阅没节点的问题：实发 Clash 配置已用 mihomo v1.19.34 `mihomo -t` 校验通过（VLESS REALITY + hy2 两种节点形状）；README 增加 FlClash 排查三点
+- 回归测试 `test/check-pages.js` 增加订阅结构检查（Clash 含 proxies / rule-providers / RULE-SET，sing-box 能解析）
+
 ### v1.0.0 — 2026-11-26（正式版）
 
 - EMOS `/link` 跳转登录 + 回调核验（萝卜 > 500），备用 Token 登录；每人专属订阅链接，可刷新/吊销
@@ -134,6 +144,6 @@ curl -fsSL https://raw.githubusercontent.com/MechanicF/emos-sub/main/manage.sh -
 ## 开发注意
 
 - **模板字面量转义**：`server.js` 里两个整页 HTML 是 JS 模板字面量，页面 JS 里的 `\'`、`\"`、`\n` 会被模板字面量吃掉反斜杠，导致发给浏览器的脚本语法错误、整页 JS 瘫痪。页面 JS 需要反斜杠转义时，源码里必须写双反斜杠（`\\'`、`\\"`、`\\n`）。
-- **回归测试**：`node test/check-pages.js` 会启动真服务，拉 `/` 和 `/admin` 的实发页面，把全部 `<script>` 拿出来 `node --check`。不要只 `node --check server.js`，服务端能过不代表浏览器收到的脚本能过。改完页面 JS 必须跑它。
+- **回归测试**：`node test/check-pages.js` 会启动真服务，拉 `/` 和 `/admin` 的实发页面，把全部 `<script>` 拿出来 `node --check`；还会走演示登录拿 Clash / sing-box 订阅，检查 Clash 里有 proxies、rule-providers、RULE-SET，sing-box 能解析出 outbounds。不要只 `node --check server.js`，服务端能过不代表浏览器收到的脚本能过。改完页面 JS 或订阅输出必须跑它。Clash 配置另可用 mihomo 校验：`mihomo -t -f <导出的 clash.yaml>`（含 `GEOIP,CN` 的完整配置需要客户端自带 GeoIP 数据库才能过 `-t`）。
 - 演示登录默认关闭，仅本地测试用 `DEMO_ENABLED=1` 开启。
 - 会话与分享只存内存，重启失效；生产如需持久化，改用 SQLite 落盘，并配好 HTTPS 与反代透传 User-Agent。

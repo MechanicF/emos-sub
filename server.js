@@ -1,4 +1,4 @@
-// EMOS-gated sing-box gateway v1.0.0 — zero dependencies.
+// EMOS-gated sing-box gateway v1.1.0 — zero dependencies.
 // Node >= 18 (uses global fetch). Run: node server.js  (PORT env, default 3000)
 // Scope: EMOS login -> carrot > 500 -> console (nodes + per-user sub links)
 // + NODE TOTAL traffic only, from https://1e.lol/api/nodes. NO per-user traffic.
@@ -14,7 +14,7 @@ const path = require('path');
 const crypto = require('crypto');
 
 const PORT = parseInt(process.env.PORT || '3000', 10);
-const VERSION = '1.0.0';
+const VERSION = '1.1.0';
 const CONFIG_PATH = path.join(__dirname, 'config', 'nodes.json');
 const CLASH_TEMPLATE_PATH = path.join(__dirname, 'config', 'templates', 'clash.yaml');
 const SINGBOX_TEMPLATE_PATH = path.join(__dirname, 'config', 'templates', 'singbox.json');
@@ -72,7 +72,7 @@ try {
 // config/templates/clash.yaml: {{PROXIES}} {{GROUPS}} {{RULES}}
 // config/templates/singbox.json: {{OUTBOUNDS}} {{PROXY_TAGS_JSON}} {{DEFAULT_TAG}}
 // Missing template files fall back to the built-in strings below.
-const BUILTIN_CLASH_TEMPLATE = 'proxies:\n{{PROXIES}}\nproxy-groups:\n{{GROUPS}}\nrules:\n{{RULES}}\n';
+const BUILTIN_CLASH_TEMPLATE = 'proxies:\n{{PROXIES}}\nproxy-groups:\n{{GROUPS}}\nrule-providers:\n{{RULE_PROVIDERS}}\nrules:\n{{RULES}}\n';
 const BUILTIN_SINGBOX_TEMPLATE = '{\n  "log": { "level": "info", "timestamp": true },\n'
   + '  "dns": {\n    "servers": [\n      { "tag": "dns-remote", "address": "tls://8.8.8.8", "detour": "PROXY" },\n'
   + '      { "tag": "dns-direct", "address": "223.5.5.5", "detour": "direct" }\n    ],\n'
@@ -539,6 +539,33 @@ function buildSingBoxConfig() {
 
 function yamlStr(s) { return JSON.stringify(String(s == null ? '' : s)); }
 
+// ACL4SSR AdblockPlus rules for Clash (mihomo / FlClash).
+// The .ini Simon linked (ACL4SSR/Clash/config/ACL4SSR_AdblockPlus.ini) is NOT
+// a Clash YAML template — it is a Sub-Store/ACL definition: `ruleset=<group>,<list>`
+// maps a rule list to a proxy group, and `custom_proxy_group=` defines the
+// groups. A converter merges a proxy list with it to produce a Clash config.
+// We do that merge here: each .list becomes an http rule-provider, each
+// ruleset becomes a RULE-SET rule, groups follow the .ini's custom_proxy_group
+// lines (same emoji names, same order). Lists are fetched by the CLIENT from
+// raw.githubusercontent (they update upstream); only GEOIP,CN is inline.
+const ACL_BASE = 'https://raw.githubusercontent.com/ACL4SSR/ACL4SSR/master/';
+const ACL_RULE_SETS = [
+  { name: 'LocalAreaNetwork', file: 'Clash/LocalAreaNetwork.list', group: '🎯 全球直连', behavior: 'classical' },
+  { name: 'BanAD', file: 'Clash/BanAD.list', group: '🛑 全球拦截', behavior: 'classical' },
+  { name: 'BanProgramAD', file: 'Clash/BanProgramAD.list', group: '🍃 应用净化', behavior: 'classical' },
+  { name: 'BanEasyList', file: 'Clash/BanEasyList.list', group: '🆎 AdBlock', behavior: 'classical' },
+  { name: 'BanEasyListChina', file: 'Clash/BanEasyListChina.list', group: '🆎 AdBlock', behavior: 'classical' },
+  { name: 'BanEasyPrivacy', file: 'Clash/BanEasyPrivacy.list', group: '🆎 AdBlock', behavior: 'classical' },
+  { name: 'GoogleCN', file: 'Clash/GoogleCN.list', group: '🎯 全球直连', behavior: 'classical' },
+  { name: 'SteamCN', file: 'Clash/Ruleset/SteamCN.list', group: '🎯 全球直连', behavior: 'classical' },
+  { name: 'Microsoft', file: 'Clash/Microsoft.list', group: 'Ⓜ️ 微软服务', behavior: 'classical' },
+  { name: 'Apple', file: 'Clash/Apple.list', group: '🍎 苹果服务', behavior: 'classical' },
+  { name: 'ProxyMedia', file: 'Clash/ProxyMedia.list', group: '🌍 国外媒体', behavior: 'classical' },
+  { name: 'Telegram', file: 'Clash/Telegram.list', group: '📲 电报信息', behavior: 'classical' },
+  { name: 'ProxyLite', file: 'Clash/ProxyLite.list', group: '🚀 节点选择', behavior: 'classical' },
+  { name: 'ChinaDomain', file: 'Clash/ChinaDomain.list', group: '🎯 全球直连', behavior: 'classical' },
+  { name: 'ChinaCompanyIp', file: 'Clash/ChinaCompanyIp.list', group: '🎯 全球直连', behavior: 'ipcidr' },
+];
 function buildClashYaml() {
   const outs = parsedNodes();
   const proxyLines = [];
@@ -593,25 +620,63 @@ function buildClashYaml() {
   }
   const names = outs.map((o) => o.tag);
   const list = '[' + names.map(yamlStr).join(', ') + ']';
+  // Groups follow the .ini's custom_proxy_group lines (same names/order).
+  // The `.*` suffix in the .ini is a proxy filter meaning "all proxies";
+  // here that is the explicit node list.
   const groupLines = [
-    '  - name: PROXY',
+    '  - name: 🚀 节点选择',
     '    type: select',
-    '    proxies: ' + list,
-    '  - name: AUTO',
+    '    proxies: [' + ['♻️ 自动选择', 'DIRECT'].map(yamlStr).join(', ') + (names.length ? ', ' + names.map(yamlStr).join(', ') : '') + ']',
+    '  - name: ♻️ 自动选择',
     '    type: url-test',
     '    proxies: ' + list,
     '    url: https://www.gstatic.com/generate_204',
     '    interval: 300',
+    '    tolerance: 50',
+    '  - name: 🌍 国外媒体',
+    '    type: select',
+    '    proxies: [' + ['🚀 节点选择', '♻️ 自动选择', '🎯 全球直连'].map(yamlStr).join(', ') + (names.length ? ', ' + names.map(yamlStr).join(', ') : '') + ']',
+    '  - name: 📲 电报信息',
+    '    type: select',
+    '    proxies: [' + ['🚀 节点选择', '🎯 全球直连'].map(yamlStr).join(', ') + (names.length ? ', ' + names.map(yamlStr).join(', ') : '') + ']',
+    '  - name: Ⓜ️ 微软服务',
+    '    type: select',
+    '    proxies: [' + ['🎯 全球直连', '🚀 节点选择'].map(yamlStr).join(', ') + (names.length ? ', ' + names.map(yamlStr).join(', ') : '') + ']',
+    '  - name: 🍎 苹果服务',
+    '    type: select',
+    '    proxies: [' + ['🚀 节点选择', '🎯 全球直连'].map(yamlStr).join(', ') + (names.length ? ', ' + names.map(yamlStr).join(', ') : '') + ']',
+    '  - name: 🎯 全球直连',
+    '    type: select',
+    '    proxies: [' + ['DIRECT', '🚀 节点选择', '♻️ 自动选择'].map(yamlStr).join(', ') + ']',
+    '  - name: 🛑 全球拦截',
+    '    type: select',
+    '    proxies: [REJECT, DIRECT]',
+    '  - name: 🍃 应用净化',
+    '    type: select',
+    '    proxies: [REJECT, DIRECT]',
+    '  - name: 🆎 AdBlock',
+    '    type: select',
+    '    proxies: [REJECT, DIRECT]',
+    '  - name: 🐟 漏网之鱼',
+    '    type: select',
+    '    proxies: [' + ['🚀 节点选择', '🎯 全球直连', '♻️ 自动选择'].map(yamlStr).join(', ') + (names.length ? ', ' + names.map(yamlStr).join(', ') : '') + ']',
   ];
-  const ruleLines = [
-    '  - IP-CIDR,192.168.0.0/16,DIRECT,no-resolve',
-    '  - IP-CIDR,10.0.0.0/8,DIRECT,no-resolve',
-    '  - IP-CIDR,172.16.0.0/12,DIRECT,no-resolve',
-    '  - MATCH,PROXY',
-  ];
+  const providerLines = [];
+  for (const rs of ACL_RULE_SETS) {
+    providerLines.push('  ' + rs.name + ':');
+    providerLines.push('    type: http');
+    providerLines.push('    behavior: ' + rs.behavior);
+    providerLines.push('    url: ' + yamlStr(ACL_BASE + rs.file));
+    providerLines.push('    path: ./ruleset/' + rs.name + '.yaml');
+    providerLines.push('    interval: 86400');
+  }
+  const ruleLines = ACL_RULE_SETS.map((rs) => '  - RULE-SET,' + rs.name + ',' + rs.group);
+  ruleLines.push('  - GEOIP,CN,🎯 全球直连,no-resolve');
+  ruleLines.push('  - MATCH,🐟 漏网之鱼');
   return CLASH_TEMPLATE
     .replace('{{PROXIES}}', proxyLines.join('\n'))
     .replace('{{GROUPS}}', groupLines.join('\n'))
+    .replace('{{RULE_PROVIDERS}}', providerLines.join('\n'))
     .replace('{{RULES}}', ruleLines.join('\n'));
 }
 

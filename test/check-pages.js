@@ -13,13 +13,22 @@ const { execFileSync } = require('child_process');
 const PORT = 3109;
 const srv = spawn(process.execPath, ['server.js'], {
   cwd: path.join(__dirname, '..'),
-  env: { ...process.env, ADMIN_TOKEN: 'test-token', PORT: String(PORT) },
+  env: { ...process.env, ADMIN_TOKEN: 'test-token', DEMO_ENABLED: '1', PORT: String(PORT) },
   stdio: 'ignore',
 });
 function get(p) {
   return new Promise((res, rej) => http.get({ host: '127.0.0.1', port: PORT, path: p }, (r) => {
     let d = ''; r.on('data', (c) => (d += c)); r.on('end', () => res(d));
   }).on('error', rej));
+}
+function postJson(p, body) {
+  return new Promise((res, rej) => {
+    const data = JSON.stringify(body);
+    const req = http.request({ host: '127.0.0.1', port: PORT, path: p, method: 'POST', headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data) } }, (r) => {
+      let d = ''; r.on('data', (c) => (d += c)); r.on('end', () => res(JSON.parse(d)));
+    });
+    req.on('error', rej); req.end(data);
+  });
 }
 (async () => {
   let code = 0;
@@ -44,6 +53,19 @@ function get(p) {
         }
       }
     }
+    // Clash subscription must carry proxies, ACL4SSR groups/providers/rules,
+    // and sing-box must be valid JSON — a structurally broken profile is
+    // exactly what shows up as "no nodes" in FlClash (2026-11-26).
+    const auth = await postJson('/api/auth', { carrot: 600 });
+    if (!auth.ok) throw new Error('/api/auth demo login failed: ' + JSON.stringify(auth));
+    const clash = await get('/c/?token=' + encodeURIComponent(auth.sub_token) + '&client=clash');
+    for (const needle of ['proxies:', 'proxy-groups:', 'rule-providers:', 'RULE-SET,BanAD', 'RULE-SET,ChinaDomain', 'GEOIP,CN', 'MATCH,', '🚀 节点选择', '🆎 AdBlock']) {
+      if (!clash.includes(needle)) { console.error('FAIL clash output missing: ' + needle); code = 1; }
+    }
+    if (!code) console.log('OK   /c/?client=clash carries proxies + ACL4SSR providers/rules (' + clash.length + ' bytes)');
+    const sb = JSON.parse(await get('/c/?token=' + encodeURIComponent(auth.sub_token) + '&client=sing-box'));
+    if (!Array.isArray(sb.outbounds) || !sb.outbounds.length) { console.error('FAIL sing-box output has no outbounds'); code = 1; }
+    else console.log('OK   /c/?client=sing-box parses, ' + sb.outbounds.length + ' outbounds');
   } catch (e) { console.error('FAIL', e.message); code = 1; }
   srv.kill();
   process.exit(code);
