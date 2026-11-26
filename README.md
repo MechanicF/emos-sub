@@ -440,6 +440,12 @@ encryption 密钥也没有写进任何永久文件或日志，汇报时只给前
 - **每人用量统计**：按锁定范围不做。`Subscription-Userinfo` 和控制台显示的
   都是节点总流量（探针整台服务器的流量），不是个人用量。
 
+## 开发注意（2026-11-26 踩坑记录）
+
+- **模板字面量转义铁律**：`server.js` 里 `/` 和 `/admin` 的整页 HTML 是 JS 模板字面量。页面 JS 里如果写 `\'`、`\"`、`\n`，模板字面量会把反斜杠吃掉，发给浏览器的脚本就语法错误，整页 JS 瘫痪。2026-11-26 实测：后台只剩标题栏、前台登录跳转后没变化，浏览器报 `Unexpected string` / `Unexpected identifier`，两个页面同时中招。页面 JS 里需要反斜杠转义时，源码里必须写双反斜杠（`\\'`、`\\"`、`\\n`）。
+- **回归测试**：`node test/check-pages.js` 会启动真服务，拉 `/` 和 `/admin` 的实发页面，把 `<script>` 拿出来 `node --check`。不要只 `node --check server.js`——服务端能过不代表浏览器收到的脚本能过。改完页面 JS 必须跑它。
+- 登录后登录卡片自动隐藏，控制台有“退出登录”按钮（POST /api/logout，清会话 + 清 `emos_session` cookie）。
+
 ## 未做 / 待确认
 
 - EMOS `/link` 登录跳转已接好（`GET /auth/emos` → EMOS 登录 →
@@ -467,6 +473,7 @@ encryption 密钥也没有写进任何永久文件或日志，汇报时只给前
 - `GET /api/sub-link` 头 `X-Session` → `{sub_url, sub_urls, import_url, share}`
 - `POST /api/sub/refresh` 头 `X-Session` → 轮换分享 token，旧 token 立即失效
 - `POST /api/sub/disable` 头 `X-Session` → 停用分享，重新登录才能恢复
+- `POST /api/logout` 头 `X-Session` 或 cookie → 结束当前会话，清 `emos_session` cookie
 - `GET /c/?token=<token>&client=<client>` → sublinkPro 风格，按 client / UA 分流
   （`clash | mihomo | sing-box | json | v2ray | uri | surge`，`links`=`uri`，`b64`=`v2ray`）
 - `GET /sub/:token` → 同上，`?format=` 是 `client` 的别名；浏览器 → HTML 说明页；

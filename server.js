@@ -1023,6 +1023,16 @@ function handleSubLink(req, res) {
   return sendJson(res, 200, { ok: true, user_id: s.user_id, demo: s.demo, sub_url: urls.url, sub_urls: urls, import_url: urls.import_url, share: shareInfo(share) });
 }
 
+// POST /api/logout — end the current user session (cookie and/or X-Session)
+// and clear the emos_session cookie. Added 2026-11-26: the console hides the
+// login card once the dashboard shows, so users need a way back out.
+function handleLogout(req, res) {
+  const s = getSession(req);
+  if (s) { sessions.delete(s.sid); if (s.shareToken) shares.delete(s.shareToken); }
+  res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Set-Cookie': 'emos_session=; HttpOnly; Path=/; Max-Age=0; SameSite=Lax' });
+  return res.end(JSON.stringify({ ok: true }));
+}
+
 // POST /api/sub/refresh — rotate the share token; the old token 403s immediately.
 function handleSubRefresh(req, res) {
   const s = getSession(req);
@@ -1510,7 +1520,7 @@ async function loadNodes(){
   var h='';
   nodes.forEach(function(n,i){
     var probe=n.probe_node_id==null?'—':'#'+n.probe_node_id+' '+(n.online===true?'<span class="pill ok">在线</span>':n.online===false?'<span class="pill bad">离线</span>':'<span class="pill">不在探针里</span>');
-    h+='<tr><td><code>'+esc(n.key)+'</code></td><td><b>'+esc(n.name)+'</b><br><span class="muted">'+esc(n.region)+'</span></td><td><span class="pill">'+esc(n.protocol||'—')+'</span></td><td>'+esc(n.server||'—')+':'+(n.server_port==null?'—':n.server_port)+'<br><span class="muted">sni: '+esc(n.sni||'—')+'</span></td><td>'+probe+'</td><td><button type="button" onclick="editNode('+i+')">编辑</button> <button type="button" class="ghost" onclick="moveNode('+i+',-1)">↑</button><button type="button" class="ghost" onclick="moveNode('+i+',1)">↓</button> <button type="button" class="danger" onclick="delNode(\''+esc(n.key)+'\')">删除</button></td></tr>';
+    h+='<tr><td><code>'+esc(n.key)+'</code></td><td><b>'+esc(n.name)+'</b><br><span class="muted">'+esc(n.region)+'</span></td><td><span class="pill">'+esc(n.protocol||'—')+'</span></td><td>'+esc(n.server||'—')+':'+(n.server_port==null?'—':n.server_port)+'<br><span class="muted">sni: '+esc(n.sni||'—')+'</span></td><td>'+probe+'</td><td><button type="button" onclick="editNode('+i+')">编辑</button> <button type="button" class="ghost" onclick="moveNode('+i+',-1)">↑</button><button type="button" class="ghost" onclick="moveNode('+i+',1)">↓</button> <button type="button" class="danger" onclick="delNode(\\''+esc(n.key)+'\\')">删除</button></td></tr>';
   });
   document.getElementById('nodeRows').innerHTML=h||'<tr><td colspan="6">暂无节点</td></tr>';
   return true;
@@ -1520,7 +1530,7 @@ async function loadShares(){
   if(r.status!==200)return;
   var h='';
   r.json.shares.forEach(function(s){
-    h+='<tr><td><code>'+esc(s.token_masked)+'</code></td><td><code>'+esc(s.user_id)+'</code></td><td>'+fmtTime(s.created_at)+'<br><span class="muted">到期：'+fmtTime(s.expires_at)+'</span></td><td>'+(s.enabled?'<span class="pill ok">启用</span>':'<span class="pill bad">停用</span>')+'</td><td>'+s.access_count+' 次</td><td>'+esc(s.last_ip||'—')+'<br><span class="muted">'+fmtTime(s.last_access_at)+'</span></td><td><button type="button" onclick="shareAct(\''+s.id+'\',\'refresh\')">刷新</button> '+(s.enabled?'<button type="button" class="ghost" onclick="shareAct(\''+s.id+'\',\'disable\')">停用</button>':'<button type="button" class="ghost" onclick="shareAct(\''+s.id+'\',\'enable\')">启用</button>')+' <button type="button" class="danger" onclick="shareDel(\''+s.id+'\')">吊销</button></td></tr>';
+    h+='<tr><td><code>'+esc(s.token_masked)+'</code></td><td><code>'+esc(s.user_id)+'</code></td><td>'+fmtTime(s.created_at)+'<br><span class="muted">到期：'+fmtTime(s.expires_at)+'</span></td><td>'+(s.enabled?'<span class="pill ok">启用</span>':'<span class="pill bad">停用</span>')+'</td><td>'+s.access_count+' 次</td><td>'+esc(s.last_ip||'—')+'<br><span class="muted">'+fmtTime(s.last_access_at)+'</span></td><td><button type="button" onclick="shareAct(\\''+s.id+'\\',\\'refresh\\')">刷新</button> '+(s.enabled?'<button type="button" class="ghost" onclick="shareAct(\\''+s.id+'\\',\\'disable\\')">停用</button>':'<button type="button" class="ghost" onclick="shareAct(\\''+s.id+'\\',\\'enable\\')">启用</button>')+' <button type="button" class="danger" onclick="shareDel(\\''+s.id+'\\')">吊销</button></td></tr>';
   });
   document.getElementById('shareRows').innerHTML=h||'<tr><td colspan="7">暂无分享（还没有用户登录过）</td></tr>';
 }
@@ -1591,7 +1601,7 @@ document.getElementById('btnCopyCmd').onclick=function(){
   var cmd='ADMIN_TOKEN=你的口令 node server.js';
   if(navigator.clipboard){navigator.clipboard.writeText(cmd).then(function(){document.getElementById('btnCopyCmd').textContent='已复制';});}
 };
-document.getElementById('btnParse').onclick=async function(){var link=document.getElementById('nodeLink').value.trim();if(!link){document.getElementById('nodeMsg').textContent='先粘贴节点链接。';return}var r=await api('POST','/api/admin/nodes/parse',{link:link});var pre=document.getElementById('nodePreview');pre.classList.remove('hidden');if(!r.json.ok){pre.textContent='解析失败：'+(r.json.error||'');return}pre.textContent='协议：'+r.json.protocol+'\n'+JSON.stringify(r.json.parsed,null,2);document.getElementById('nodeMsg').textContent='解析成功，确认无误后点“保存节点”。'};
+document.getElementById('btnParse').onclick=async function(){var link=document.getElementById('nodeLink').value.trim();if(!link){document.getElementById('nodeMsg').textContent='先粘贴节点链接。';return}var r=await api('POST','/api/admin/nodes/parse',{link:link});var pre=document.getElementById('nodePreview');pre.classList.remove('hidden');if(!r.json.ok){pre.textContent='解析失败：'+(r.json.error||'');return}pre.textContent='协议：'+r.json.protocol+'\\n'+JSON.stringify(r.json.parsed,null,2);document.getElementById('nodeMsg').textContent='解析成功，确认无误后点“保存节点”。'};
 document.getElementById('btnSaveNode').onclick=async function(){var link=document.getElementById('nodeLink').value.trim();var name=document.getElementById('nodeName').value.trim();var region=document.getElementById('nodeRegion').value.trim();var probe=document.getElementById('nodeProbe').value;var key=document.getElementById('nodeKey').value.trim();if(!link){document.getElementById('nodeMsg').textContent='链接不能为空。';return}var body={link:link,name:name,region:region,probe_node_id:probe===''?null:Number(probe)};var r;if(editingKey){r=await api('PUT','/api/admin/nodes/'+encodeURIComponent(editingKey),body)}else{if(key)body.key=key;r=await api('POST','/api/admin/nodes',body)}if(!r.json.ok){document.getElementById('nodeMsg').textContent='保存失败：'+(r.json.error||'');return}document.getElementById('nodeMsg').textContent='已保存：'+(r.json.node&&r.json.node.key);editingKey=null;document.getElementById('formTitle').textContent='添加节点';document.getElementById('nodeLink').value='';document.getElementById('nodeName').value='';document.getElementById('nodeRegion').value='';document.getElementById('nodeProbe').value='';document.getElementById('nodeKey').value='';document.getElementById('nodeKey').disabled=false;document.getElementById('btnCancelEdit').classList.add('hidden');document.getElementById('nodePreview').classList.add('hidden');await loadNodes();await loadHealth()};
 document.getElementById('btnCancelEdit').onclick=function(){editingKey=null;document.getElementById('formTitle').textContent='添加节点';document.getElementById('nodeLink').value='';document.getElementById('nodeName').value='';document.getElementById('nodeRegion').value='';document.getElementById('nodeProbe').value='';document.getElementById('nodeKey').value='';document.getElementById('nodeKey').disabled=false;document.getElementById('btnCancelEdit').classList.add('hidden');document.getElementById('nodeMsg').textContent=''};
 document.getElementById('btnRevokeAll').onclick=async function(){if(!confirm('确定吊销全部订阅链接？所有用户的订阅立即失效，他们需要重新登录。'))return;var r=await api('POST','/api/admin/shares/revoke-all');if(!r.json.ok){document.getElementById('shareMsg').textContent='操作失败：'+(r.json.error||'');return}document.getElementById('shareMsg').textContent='已吊销 '+r.json.revoked+' 条分享。';await loadShares()};
@@ -1695,7 +1705,7 @@ code{word-break:break-all;background:rgba(0,0,0,.4);padding:2px 7px;border-radiu
 <div class="sub-row"><span class="lbl">通用链接（hy2 / vless）</span><code id="subLinks"></code><button type="button" id="btnCopyLinks">复制</button></div>
 <p class="muted">三个地址是同一个订阅 token、按格式分流；/c/?token=…&amp;client=…（sublinkPro 风格）和 /sub/&lt;token&gt;?format=… 都可用；base64 版见控制台接口 /api/sub-link。</p>
 <p class="muted" id="shareInfo"></p>
-<div class="actions"><button type="button" id="btnImport">一键导入 sing-box</button> <button type="button" class="ghost" id="btnRefresh">刷新流量</button> <button type="button" class="ghost" id="btnRotate">刷新订阅链接（旧链接立即失效）</button> <button type="button" class="ghost" id="btnDisable">停用订阅链接</button></div>
+<div class="actions"><button type="button" id="btnImport">一键导入 sing-box</button> <button type="button" class="ghost" id="btnRefresh">刷新流量</button> <button type="button" class="ghost" id="btnRotate">刷新订阅链接（旧链接立即失效）</button> <button type="button" class="ghost" id="btnDisable">停用订阅链接</button> <button type="button" class="ghost" id="btnLogout">退出登录</button></div>
 <p class="muted" id="copyMsg"></p></div>
 <div class="card"><h2>节点 · 总流量（探针）</h2><p class="muted" id="probeNote"></p><div class="table-scroll"><table><thead><tr><th>节点</th><th>状态 / 实时</th><th>今日</th><th>本月已用 / 限额</th><th>CPU / 运行</th></tr></thead><tbody id="nodeRows"></tbody></table></div></div>
 </div>
@@ -1721,7 +1731,7 @@ async function doAuth(body){
     if(j.reason==="carrot<=500"){
       document.getElementById("gatedCard").classList.remove("hidden");
       document.getElementById("dash").classList.add("hidden");
-      document.getElementById("gatedMsg").innerHTML="萝卜：<b>"+j.carrot+"</b><div class=\"big-num bad\">还差 "+j.shortfall+"</div>才到 501（&gt; 500）。";
+      document.getElementById("gatedMsg").innerHTML="萝卜：<b>"+j.carrot+"</b><div class=\\"big-num bad\\">还差 "+j.shortfall+"</div>才到 501（&gt; 500）。";
       showMsg("未达标：萝卜 "+j.carrot+"，还差 "+j.shortfall+"。");
     }else{showMsg("登录失败：" + (j.error||"未知错误"))}
     return;
@@ -1729,6 +1739,7 @@ async function doAuth(body){
   session=j.session;subUrls=j.sub_urls||{singbox:j.sub_url,clash:j.sub_url,links:j.sub_url};importUrl=j.import_url;
   document.getElementById("gatedCard").classList.add("hidden");
   document.getElementById("dash").classList.remove("hidden");
+  document.getElementById("loginCard").classList.add("hidden");
   document.getElementById("who").textContent=j.user_id+(j.username?" ("+j.username+")":"");
   document.getElementById("carrotOut").textContent=j.carrot;
   document.getElementById("statCarrot").textContent=j.carrot;
@@ -1752,12 +1763,12 @@ async function loadNodes(){
   var html="";
   j.nodes.forEach(function(n){
     var pct=n.pct_used==null?"—":n.pct_used+"%";
-    var bar=n.pct_used==null?"":"<div class=\"bar\"><i style=\"width:"+Math.min(100,n.pct_used)+"\"></i></div>";
+    var bar=n.pct_used==null?"":"<div class=\\"bar\\"><i style=\\"width:"+Math.min(100,n.pct_used)+"\\"></i></div>";
     var up=n.uptime==null?"—":Math.floor(n.uptime/86400)+" 天";
     var pill=n.online===true?'<span class="pill ok">在线</span>':n.online===false?'<span class="pill bad">离线</span>':'<span class="pill">未知 · 不在探针里</span>';
-    html+="<tr><td><b>"+esc(n.name)+"</b><br><span class=\"muted\">"+esc(n.region)+" · 探针："+esc(n.probe_name)+" #"+n.probe_node_id+"</span></td><td>"+pill+"<br><span class=\"muted\">↑ "+fmtSpeed(n.net_tx)+" ↓ "+fmtSpeed(n.net_rx)+"</span></td><td>"+fmt(n.day_used)+"</td><td>"+fmt(n.month_used)+" / "+(n.traffic_limit?fmt(n.traffic_limit):"不限")+"<br><span class=\"muted\">已用 "+pct+" · 剩余 "+(n.remaining==null?"—":fmt(n.remaining))+"</span>"+bar+"</td><td>"+(n.cpu==null?"—":n.cpu.toFixed(1)+"%")+"<br><span class=\"muted\">"+up+"</span></td></tr>";
+    html+="<tr><td><b>"+esc(n.name)+"</b><br><span class=\\"muted\\">"+esc(n.region)+" · 探针："+esc(n.probe_name)+" #"+n.probe_node_id+"</span></td><td>"+pill+"<br><span class=\\"muted\\">↑ "+fmtSpeed(n.net_tx)+" ↓ "+fmtSpeed(n.net_rx)+"</span></td><td>"+fmt(n.day_used)+"</td><td>"+fmt(n.month_used)+" / "+(n.traffic_limit?fmt(n.traffic_limit):"不限")+"<br><span class=\\"muted\\">已用 "+pct+" · 剩余 "+(n.remaining==null?"—":fmt(n.remaining))+"</span>"+bar+"</td><td>"+(n.cpu==null?"—":n.cpu.toFixed(1)+"%")+"<br><span class=\\"muted\\">"+up+"</span></td></tr>";
   });
-  document.getElementById("nodeRows").innerHTML=html||"<tr><td colspan=\"5\">暂无节点</td></tr>";
+  document.getElementById("nodeRows").innerHTML=html||"<tr><td colspan=\\"5\\">暂无节点</td></tr>";
 }
 document.getElementById("btnToken").onclick=function(){var t=document.getElementById("token").value.trim();if(!t){showMsg("先粘贴 EMOS token");return}doAuth({token:t})};
 document.getElementById("btnDemo").onclick=function(){doAuth({carrot:Number(document.getElementById("demoCarrot").value)})};
@@ -1771,6 +1782,7 @@ document.getElementById("btnDisable").onclick=async function(){if(!confirm("停�
 document.getElementById("btnCopyLinks").onclick=function(){if(subUrls)copyText(subUrls.links,"已复制通用 hy2 订阅链接。")};
 document.getElementById("btnImport").onclick=function(){if(importUrl)window.location.href=importUrl};
 document.getElementById("btnRefresh").onclick=function(){loadNodes()};
+document.getElementById("btnLogout").onclick=async function(){try{await fetch("/api/logout",{method:"POST",credentials:"include",headers:session?{"X-Session":session}:{}});}catch(e){}session=null;subUrls=null;importUrl="";document.getElementById("dash").classList.add("hidden");document.getElementById("gatedCard").classList.add("hidden");document.getElementById("loginCard").classList.remove("hidden");showMsg("已退出登录。")};
 (function(){var q=new URLSearchParams(location.search);var e=q.get("emos_error");if(!e)return;var c=q.get("carrot");var m={no_token:"EMOS 回跳里没有带 token，请重新点“用 EMOS 账号登录”再试一次。",bad_state:"登录状态不对（uuid 不匹配或已过期），请重新点“用 EMOS 账号登录”。",not_signed_in:"EMOS 未确认这次登录（sign/check 未通过：可能是 token 无效，或今天还没在 EMOS 签到），请在 EMOS 登录/签到后再试。",carrot_insufficient:"萝卜不够：当前 "+(c||"?")+"，还差 "+(c?Math.max(0,501-c):"?")+" 才到 501（> 500）。"};showMsg(m[e]||("登录失败："+e));history.replaceState(null,"",location.pathname);})();
 async function tryResume(){
   try{
@@ -1785,6 +1797,7 @@ async function tryResume(){
     importUrl=j2.import_url;
     document.getElementById("gatedCard").classList.add("hidden");
     document.getElementById("dash").classList.remove("hidden");
+    document.getElementById("loginCard").classList.add("hidden");
     document.getElementById("who").textContent=j.user_id;
     document.getElementById("carrotOut").textContent=j.carrot;
     document.getElementById("statCarrot").textContent=j.carrot;
@@ -1821,6 +1834,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && u.pathname === '/api/sub-link') return handleSubLink(req, res);
     if (req.method === 'POST' && u.pathname === '/api/sub/refresh') return handleSubRefresh(req, res);
     if (req.method === 'POST' && u.pathname === '/api/sub/disable') return handleSubDisable(req, res);
+    if (req.method === 'POST' && u.pathname === '/api/logout') return handleLogout(req, res);
     if (req.method === 'GET' && u.pathname === '/c/') {
       const token = u.searchParams.get('token');
       if (!token) return sendJson(res, 400, { ok: false, error: 'missing ?token=' });
