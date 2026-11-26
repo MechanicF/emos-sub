@@ -29,17 +29,19 @@ function get(p) {
     }
     for (const p of ['/', '/admin']) {
       const html = await get(p);
-      const m = html.match(/<script>([\s\S]*?)<\/script>/);
-      if (!m) throw new Error(p + ': no <script> found');
-      const f = path.join(os.tmpdir(), 'emos-page-' + p.replace(/\//g, '_') + '.js');
-      fs.writeFileSync(f, m[1]);
-      try {
-        execFileSync(process.execPath, ['--check', f], { stdio: 'pipe' });
-        console.log('OK   ' + p + ' served script parses (' + m[1].length + ' bytes)');
-      } catch (e) {
-        console.error('FAIL ' + p + ' served script does not parse:');
-        console.error(e.stderr.toString());
-        code = 1;
+      const scripts = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(m => m[1]);
+      if (!scripts.length) throw new Error(p + ': no <script> found');
+      for (let i = 0; i < scripts.length; i++) {
+        const f = path.join(os.tmpdir(), 'emos-page-' + p.replace(/\//g, '_') + '-' + i + '.js');
+        fs.writeFileSync(f, scripts[i]);
+        try {
+          execFileSync(process.execPath, ['--check', f], { stdio: 'pipe' });
+          console.log('OK   ' + p + ' script[' + i + '] parses (' + scripts[i].length + ' bytes)');
+        } catch (e) {
+          console.error('FAIL ' + p + ' script[' + i + '] does not parse:');
+          console.error(e.stderr.toString());
+          code = 1;
+        }
       }
     }
   } catch (e) { console.error('FAIL', e.message); code = 1; }

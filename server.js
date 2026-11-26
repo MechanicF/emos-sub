@@ -1342,8 +1342,24 @@ async function handleAdminApi(req, res) {
 }
 
 // --- admin page (single page, plain HTML/JS, no build step) ---------------
-const ADMIN_HTML = `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>后台管理 · EMOS 订阅网关</title><style>
+const ADMIN_HTML = `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>后台管理 · EMOS 订阅网关</title><script>try{var t=localStorage.getItem("emos-theme");if(t==="light"||t==="dark")document.documentElement.setAttribute("data-theme",t)}catch(e){}</script><style>
 :root{--bg:#0a0e17;--card:rgba(255,255,255,.045);--card-solid:#121826;--border:rgba(255,255,255,.09);--text:#eef2f8;--muted:#94a3b8;--faint:#64748b;--accent:#6366f1;--accent2:#22d3ee;--grad:linear-gradient(135deg,#6366f1,#8b5cf6 48%,#22d3ee);--green:#34d399;--green-bg:rgba(52,211,153,.13);--red:#f87171;--red-bg:rgba(248,113,113,.13);--amber:#fbbf24;--amber-bg:rgba(251,191,36,.12);--radius:16px;--shadow:0 12px 32px rgba(0,0,0,.38)}
+html[data-theme="light"]{--bg:#f1f5f9;--card:rgba(255,255,255,.82);--card-solid:#ffffff;--border:rgba(15,23,42,.12);--text:#0f172a;--muted:#64748b;--faint:#94a3b8;--accent:#4f46e5;--accent2:#0891b2;--green:#059669;--green-bg:rgba(5,150,105,.12);--red:#dc2626;--red-bg:rgba(220,38,38,.08);--amber:#b45309;--amber-bg:rgba(180,83,9,.1);--shadow:0 10px 28px rgba(15,23,42,.1)}
+html[data-theme="light"] body{background:radial-gradient(900px 480px at 12% -10%,rgba(99,102,241,.16),transparent 60%),radial-gradient(760px 480px at 92% 0%,rgba(34,211,238,.12),transparent 55%),linear-gradient(180deg,#f8fafc,#edf1f7)}
+html[data-theme="light"] .pill{background:rgba(15,23,42,.05)}
+html[data-theme="light"] .pill.accent{color:#4338ca;background:rgba(79,70,229,.1);border-color:rgba(79,70,229,.35)}
+html[data-theme="light"] a{color:#1d4ed8}
+html[data-theme="light"] input,html[data-theme="light"] textarea{background:rgba(255,255,255,.7)}
+html[data-theme="light"] button.ghost{background:rgba(15,23,42,.05)}
+html[data-theme="light"] button.ghost:hover{background:rgba(15,23,42,.09)}
+html[data-theme="light"] th,html[data-theme="light"] td{border-bottom-color:rgba(15,23,42,.07)}
+html[data-theme="light"] tbody tr:hover{background:rgba(15,23,42,.03)}
+html[data-theme="light"] code{background:rgba(15,23,42,.07)}
+html[data-theme="light"] pre{background:rgba(15,23,42,.05)}
+html[data-theme="light"] .bar{background:rgba(15,23,42,.1)}
+html[data-theme="light"] .stat{background:rgba(255,255,255,.7)}
+html[data-theme="light"] .sub-row{background:rgba(255,255,255,.7)}
+html[data-theme="light"] .cmd{background:rgba(15,23,42,.05)}
 *{box-sizing:border-box}
 body{margin:0;padding:28px 20px 48px;min-height:100vh;color:var(--text);font-family:system-ui,-apple-system,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;font-size:15px;line-height:1.55;background:radial-gradient(900px 480px at 12% -10%,rgba(99,102,241,.28),transparent 60%),radial-gradient(760px 480px at 92% 0%,rgba(34,211,238,.15),transparent 55%),linear-gradient(180deg,#0b0f1a,#090d16)}
 .wrap{max-width:1020px;margin:0 auto}
@@ -1412,7 +1428,7 @@ pre{background:rgba(0,0,0,.4);border:1px solid var(--border);border-radius:10px;
 .section-head{display:flex;align-items:baseline;justify-content:space-between;gap:10px;flex-wrap:wrap}
 @media (max-width:640px){body{padding:18px 12px 36px}.card{padding:16px}.form-grid{grid-template-columns:1fr}.stat{min-width:calc(50% - 6px)}}
 </style></head><body><div class="wrap">
-<div class="topbar"><div class="brand-mark"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 3 7v6c0 5 4 8 9 9 5-1 9-4 9-9V7l-9-5z"/><path d="M9 12l2 2 4-4"/></svg></div><div><h1>后台管理</h1><p class="subtitle">EMOS 订阅网关 · 只有站长能进</p></div><span class="pill accent" style="margin-left:auto">站长后台</span></div>
+<div class="topbar"><div class="brand-mark"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 3 7v6c0 5 4 8 9 9 5-1 9-4 9-9V7l-9-5z"/><path d="M9 12l2 2 4-4"/></svg></div><div><h1>后台管理</h1><p class="subtitle">EMOS 订阅网关 · 只有站长能进</p></div><span class="pill accent" style="margin-left:auto">站长后台</span><button type="button" class="ghost" id="btnTheme" style="margin:0 0 0 8px">白天模式</button></div>
 <p class="muted">管理节点（订阅内容）、分享链接、设置。用户控制台在 <a href="/">/</a>，节点改完订阅立即生效，不用重启。</p>
 
 <div class="card warn-card hidden" id="unconfiguredCard"><h2>后台未配置</h2>
@@ -1462,6 +1478,9 @@ pre{background:rgba(0,0,0,.4);border:1px solid var(--border);border-radius:10px;
 <button type="button" id="btnSaveSettings">保存设置</button> <p id="setMsg" class="msg"></p></div>
 </div></div>
 <script>
+function applyTheme(t){document.documentElement.setAttribute("data-theme",t);var b=document.getElementById("btnTheme");if(b)b.textContent=t==="light"?"夜间模式":"白天模式";try{localStorage.setItem("emos-theme",t)}catch(e){}}
+document.getElementById("btnTheme").onclick=function(){applyTheme(document.documentElement.getAttribute("data-theme")==="light"?"dark":"light")};
+applyTheme(document.documentElement.getAttribute("data-theme")||"dark");
 var nodes=[],editingKey=null,adminSession=null;
 function esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;')}
 function fmtTime(t){return t?new Date(t).toLocaleString():'—'}
@@ -1610,8 +1629,24 @@ initAdmin();
 </script></body></html>`;
 
 // --- console HTML (single page, no dependencies) -------------------------
-const HTML = `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>EMOS 订阅控制台 · 原型</title><style>
+const HTML = `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>EMOS 订阅控制台 · 原型</title><script>try{var t=localStorage.getItem("emos-theme");if(t==="light"||t==="dark")document.documentElement.setAttribute("data-theme",t)}catch(e){}</script><style>
 :root{--bg:#0a0e17;--card:rgba(255,255,255,.045);--card-solid:#121826;--border:rgba(255,255,255,.09);--text:#eef2f8;--muted:#94a3b8;--faint:#64748b;--accent:#6366f1;--accent2:#22d3ee;--grad:linear-gradient(135deg,#6366f1,#8b5cf6 48%,#22d3ee);--green:#34d399;--green-bg:rgba(52,211,153,.13);--red:#f87171;--red-bg:rgba(248,113,113,.13);--amber:#fbbf24;--amber-bg:rgba(251,191,36,.12);--radius:16px;--shadow:0 12px 32px rgba(0,0,0,.38)}
+html[data-theme="light"]{--bg:#f1f5f9;--card:rgba(255,255,255,.82);--card-solid:#ffffff;--border:rgba(15,23,42,.12);--text:#0f172a;--muted:#64748b;--faint:#94a3b8;--accent:#4f46e5;--accent2:#0891b2;--green:#059669;--green-bg:rgba(5,150,105,.12);--red:#dc2626;--red-bg:rgba(220,38,38,.08);--amber:#b45309;--amber-bg:rgba(180,83,9,.1);--shadow:0 10px 28px rgba(15,23,42,.1)}
+html[data-theme="light"] body{background:radial-gradient(900px 480px at 12% -10%,rgba(99,102,241,.16),transparent 60%),radial-gradient(760px 480px at 92% 0%,rgba(34,211,238,.12),transparent 55%),linear-gradient(180deg,#f8fafc,#edf1f7)}
+html[data-theme="light"] .pill{background:rgba(15,23,42,.05)}
+html[data-theme="light"] .pill.accent{color:#4338ca;background:rgba(79,70,229,.1);border-color:rgba(79,70,229,.35)}
+html[data-theme="light"] a{color:#1d4ed8}
+html[data-theme="light"] input,html[data-theme="light"] textarea{background:rgba(255,255,255,.7)}
+html[data-theme="light"] button.ghost{background:rgba(15,23,42,.05)}
+html[data-theme="light"] button.ghost:hover{background:rgba(15,23,42,.09)}
+html[data-theme="light"] th,html[data-theme="light"] td{border-bottom-color:rgba(15,23,42,.07)}
+html[data-theme="light"] tbody tr:hover{background:rgba(15,23,42,.03)}
+html[data-theme="light"] code{background:rgba(15,23,42,.07)}
+html[data-theme="light"] pre{background:rgba(15,23,42,.05)}
+html[data-theme="light"] .bar{background:rgba(15,23,42,.1)}
+html[data-theme="light"] .stat{background:rgba(255,255,255,.7)}
+html[data-theme="light"] .sub-row{background:rgba(255,255,255,.7)}
+html[data-theme="light"] .cmd{background:rgba(15,23,42,.05)}
 *{box-sizing:border-box}
 body{margin:0;padding:28px 20px 48px;min-height:100vh;color:var(--text);font-family:system-ui,-apple-system,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;font-size:15px;line-height:1.55;background:radial-gradient(900px 480px at 12% -10%,rgba(99,102,241,.28),transparent 60%),radial-gradient(760px 480px at 92% 0%,rgba(34,211,238,.15),transparent 55%),linear-gradient(180deg,#0b0f1a,#090d16)}
 .wrap{max-width:920px;margin:0 auto}
@@ -1672,7 +1707,7 @@ code{word-break:break-all;background:rgba(0,0,0,.4);padding:2px 7px;border-radiu
 .msg{font-size:13px;color:var(--muted);margin:10px 0 0;min-height:18px}
 @media (max-width:640px){body{padding:18px 12px 36px}.card{padding:16px}.stat{min-width:calc(50% - 6px)}.sub-row{flex-wrap:wrap}.sub-row .lbl{width:100%}.sub-row code{white-space:normal}}
 </style></head><body><div class="wrap">
-<div class="topbar"><div class="brand-mark"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 4 14h6l-1 8 9-12h-6l1-8z"/></svg></div><div><h1>EMOS 订阅控制台</h1><p class="subtitle">EMOS 登录 · 萝卜 &gt; 500 解锁订阅</p></div><span class="pill accent" style="margin-left:auto">原型</span></div>
+<div class="topbar"><div class="brand-mark"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 4 14h6l-1 8 9-12h-6l1-8z"/></svg></div><div><h1>EMOS 订阅控制台</h1><p class="subtitle">EMOS 登录 · 萝卜 &gt; 500 解锁订阅</p></div><span class="pill accent" style="margin-left:auto">原型</span><button type="button" class="ghost" id="btnTheme" style="margin:0 0 0 8px">白天模式</button></div>
 <p class="muted">EMOS 登录 → 萝卜 &gt; 500 才能进控制台。节点流量是探针里的整台服务器流量（不是单条节点、不是每人用量）。</p>
 
 <div class="card hero" id="loginCard"><h2>登录</h2>
@@ -1710,6 +1745,9 @@ code{word-break:break-all;background:rgba(0,0,0,.4);padding:2px 7px;border-radiu
 <div class="card"><h2>节点 · 总流量（探针）</h2><p class="muted" id="probeNote"></p><div class="table-scroll"><table><thead><tr><th>节点</th><th>状态 / 实时</th><th>今日</th><th>本月已用 / 限额</th><th>CPU / 运行</th></tr></thead><tbody id="nodeRows"></tbody></table></div></div>
 </div>
 </div><script>
+function applyTheme(t){document.documentElement.setAttribute("data-theme",t);var b=document.getElementById("btnTheme");if(b)b.textContent=t==="light"?"夜间模式":"白天模式";try{localStorage.setItem("emos-theme",t)}catch(e){}}
+document.getElementById("btnTheme").onclick=function(){applyTheme(document.documentElement.getAttribute("data-theme")==="light"?"dark":"light")};
+applyTheme(document.documentElement.getAttribute("data-theme")||"dark");
 var session=null,subUrls=null,importUrl="";
 function copyText(t,msg){if(navigator.clipboard){navigator.clipboard.writeText(t).then(function(){document.getElementById("copyMsg").textContent=msg||"已复制。"})}else{document.getElementById("copyMsg").textContent=t}}
 function fmt(n){if(n==null)return "-";var u=["B","KB","MB","GB","TB"],i=0;while(n>=1024&&i<u.length-1){n/=1024;i++}return n.toFixed(n>=100?0:1)+" "+u[i]}
