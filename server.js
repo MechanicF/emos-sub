@@ -1,4 +1,4 @@
-// EMOS-gated sing-box gateway v1.5.4 — zero dependencies.
+// EMOS-gated sing-box gateway v1.5.6 — zero dependencies.
 // Node >= 18 (uses global fetch). Run: node server.js  (PORT env, default 3000)
 // Scope: EMOS login -> carrot > 500 -> console (nodes + per-user sub links)
 // + NODE TOTAL traffic only, from https://1e.lol/api/nodes. NO per-user traffic.
@@ -25,7 +25,7 @@ const path = require('path');
 const crypto = require('crypto');
 
 const PORT = parseInt(process.env.PORT || '3000', 10);
-const VERSION = '1.5.5';
+const VERSION = '1.5.6';
 const CONFIG_PATH = path.join(__dirname, 'config', 'nodes.json');
 const CLASH_TEMPLATE_PATH = path.join(__dirname, 'config', 'templates', 'clash.yaml');
 const SINGBOX_TEMPLATE_PATH = path.join(__dirname, 'config', 'templates', 'singbox.json');
@@ -1534,12 +1534,13 @@ async function serveSubscription(req, res, token) {
 
   if (format === 'html') {
     const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
-    const page = '<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>订阅 · EMOS-gated</title>'
-      + '<style>body{margin:0;padding:28px 20px 48px;min-height:100vh;color:#eef2f8;font-family:system-ui,-apple-system,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;font-size:15px;line-height:1.6;background:linear-gradient(rgba(255,255,255,.022) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,.022) 1px,transparent 1px),radial-gradient(1000px 520px at 10% -10%,rgba(99,102,241,.32),transparent 60%),radial-gradient(820px 500px at 95% -5%,rgba(34,211,238,.16),transparent 55%),radial-gradient(720px 520px at 50% 115%,rgba(139,92,246,.14),transparent 60%),linear-gradient(180deg,#080c16,#070a12);background-size:44px 44px,44px 44px,auto,auto,auto,auto}.wrap{max-width:640px;margin:0 auto}.card{background:rgba(255,255,255,.045);border:1px solid rgba(255,255,255,.09);border-radius:20px;padding:20px 22px;margin:14px 0;box-shadow:0 16px 40px rgba(0,0,0,.42)}h1{font-size:23px;font-weight:800;letter-spacing:-.01em;margin:0 0 6px}h2{font-size:13px;letter-spacing:.1em;text-transform:uppercase;color:#94a3b8;margin:0 0 8px}a{color:#93c5fd;text-decoration:none}a:hover{text-decoration:underline}code{word-break:break-all;background:rgba(0,0,0,.4);padding:2px 7px;border-radius:6px;font-size:13px}.muted{color:#94a3b8;font-size:13px}</style></head><body><div class="wrap">'
-      + '<h1>订阅链接</h1><p class="muted">专属订阅地址，萝卜 ≤ ' + CARROT_THRESHOLD + ' 即失效。请在客户端里粘贴这条链接，不要用浏览器直接下载。</p>'
-      + '<div class="card"><h2>订阅链接（按客户端自动识别）</h2><p><a href="' + esc(urls.c_url) + '">' + esc(urls.c_url) + '</a></p><p><a href="' + esc(urls.import_url) + '">一键导入</a></p></div>'
-      + '<p class="muted">同一条链接，FlClash / Clash Verge 返回 Clash，sing-box / Hiddify / Karing 返回 JSON，Surge 返回 Surge 配置，Shadowrocket、Loon 等返回通用链接列表。Subscription-Userinfo 为节点总流量，不是个人用量；到期时间为本月底 23:59。</p>'
-      + '</div></body></html>';
+      const page = '<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>订阅链接 · EMOS 订阅网关</title>'
+        + '<style>' + UI_CSS + '</style></head><body class="narrow"><div class="wrap">'
+        + '<div class="topbar"><div class="brand-mark"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h5l4 5h7"/><circle cx="4" cy="6" r="1.6"/><circle cx="20" cy="11" r="1.6"/><path d="M4 18h16"/></svg></div><div><h1>订阅链接</h1><p class="subtitle">按客户端自动识别格式</p></div><span class="ver">EMOS</span></div>'
+        + '<p class="muted">专属订阅地址，萝卜 ≤ ' + CARROT_THRESHOLD + ' 即失效。请在客户端里粘贴这条链接，不要用浏览器直接下载。</p>'
+        + '<div class="card"><h2>按客户端自动识别</h2><div class="sub-row"><span class="lbl">订阅地址</span><code><a href="' + esc(urls.c_url) + '">' + esc(urls.c_url) + '</a></code></div><p class="muted" style="margin:16px 0 0"><a href="' + esc(urls.import_url) + '">导入配置</a></p></div>'
+        + '<p class="muted">同一条链接，FlClash / Clash Verge 返回 Clash，sing-box / Hiddify / Karing 返回 JSON，Surge 返回 Surge 配置，Shadowrocket、Loon 等返回通用链接列表。Subscription-Userinfo 为节点总流量，不是个人用量；到期时间为本月底 23:59。</p>'
+        + '</div></body></html>';
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', ...commonHeaders });
     return res.end(page);
   }
@@ -1808,128 +1809,158 @@ async function handleAdminApi(req, res) {
 }
 
 // --- admin page (single page, plain HTML/JS, no build step) ---------------
-const ADMIN_HTML = `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>后台管理 · EMOS 订阅网关</title><script>try{var t=localStorage.getItem("emos-theme");if(t==="light"||t==="dark")document.documentElement.setAttribute("data-theme",t)}catch(e){}</script><style>
-:root{--bg:#070b14;--card:rgba(255,255,255,.04);--card-solid:#101728;--border:rgba(255,255,255,.08);--text:#f1f5f9;--muted:#8b98ad;--faint:#5b6b82;--accent:#6366f1;--accent2:#22d3ee;--grad:linear-gradient(135deg,#6366f1,#8b5cf6 48%,#22d3ee);--green:#34d399;--green-bg:rgba(52,211,153,.13);--red:#f87171;--red-bg:rgba(248,113,113,.13);--amber:#fbbf24;--amber-bg:rgba(251,191,36,.12);--radius:20px;--shadow:0 16px 40px rgba(0,0,0,.42)}
-html[data-theme="light"]{--bg:#edf1f7;--card:rgba(255,255,255,.86);--card-solid:#ffffff;--border:rgba(15,23,42,.09);--text:#0f172a;--muted:#5f6f88;--faint:#94a3b8;--accent:#4f46e5;--accent2:#0891b2;--green:#059669;--green-bg:rgba(5,150,105,.12);--red:#dc2626;--red-bg:rgba(220,38,38,.08);--amber:#b45309;--amber-bg:rgba(180,83,9,.1);--shadow:0 14px 32px rgba(15,23,42,.10)}
-html[data-theme="light"] body{background:linear-gradient(rgba(15,23,42,.028) 1px,transparent 1px),linear-gradient(90deg,rgba(15,23,42,.028) 1px,transparent 1px),radial-gradient(1000px 520px at 10% -10%,rgba(99,102,241,.14),transparent 60%),radial-gradient(820px 500px at 95% -5%,rgba(34,211,238,.10),transparent 55%),linear-gradient(180deg,#f8fafc,#e9eef5);background-size:44px 44px,44px 44px,auto,auto,auto}
-html[data-theme="light"] .pill{background:rgba(15,23,42,.05)}
-html[data-theme="light"] .pill.accent{color:#4338ca;background:rgba(79,70,229,.1);border-color:rgba(79,70,229,.35)}
-html[data-theme="light"] a{color:#1d4ed8}
-html[data-theme="light"] input,html[data-theme="light"] textarea{background:rgba(255,255,255,.7)}
-html[data-theme="light"] button.ghost{background:rgba(15,23,42,.05)}
-html[data-theme="light"] button.ghost:hover{background:rgba(15,23,42,.09)}
-html[data-theme="light"] th,html[data-theme="light"] td{border-bottom-color:rgba(15,23,42,.07)}
-html[data-theme="light"] tbody tr:hover{background:rgba(15,23,42,.03)}
-html[data-theme="light"] code{background:rgba(15,23,42,.07)}
-html[data-theme="light"] pre{background:rgba(15,23,42,.05)}
-html[data-theme="light"] .bar{background:rgba(15,23,42,.1)}
-html[data-theme="light"] .stat{background:rgba(255,255,255,.7)}
-html[data-theme="light"] .sub-row{background:rgba(255,255,255,.7)}
-html[data-theme="light"] .cmd{background:rgba(15,23,42,.05)}
+// Shared UI tokens for console, admin and chooser pages.
+const UI_CSS = `:root{
+ --bg:#0b0d14;--surface:#11141c;--raised:#1a1e28;
+ --text:#eef0f5;--text-2:#a3a9b8;--muted:#7a8296;
+ --line:rgba(238,240,245,.09);--line-2:rgba(238,240,245,.16);
+ --accent:#5ad1c4;--btn-ink:#0b0d14;
+ --positive:#4cc38a;--negative:#e5484d;--warning:#d9a441;
+ --ease:cubic-bezier(.22,1,.36,1);
+ --sans:"IBM Plex Sans",Inter,system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+ --mono:ui-monospace,"SFMono-Regular","JetBrains Mono",Consolas,"Liberation Mono",monospace
+}
+[data-theme="light"]{
+ --bg:#f5f7fa;--surface:#ffffff;--raised:#eceff4;
+ --text:#111827;--text-2:#4b5565;--muted:#6b7487;
+ --line:rgba(17,24,39,.10);--line-2:rgba(17,24,39,.18);
+ --accent:#0f766e;--btn-ink:#ffffff;
+ --positive:#16a34a;--negative:#dc2626;--warning:#b45309
+}
 *{box-sizing:border-box}
-body::before{content:"";position:fixed;top:0;left:0;right:0;height:2px;background:var(--grad);z-index:50}
-::selection{background:rgba(99,102,241,.35)}
-body{margin:0;padding:28px 20px 48px;min-height:100vh;color:var(--text);font-family:system-ui,-apple-system,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;font-size:15px;line-height:1.6;background:linear-gradient(rgba(255,255,255,.022) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,.022) 1px,transparent 1px),radial-gradient(1000px 520px at 10% -10%,rgba(99,102,241,.32),transparent 60%),radial-gradient(820px 500px at 95% -5%,rgba(34,211,238,.16),transparent 55%),radial-gradient(720px 520px at 50% 115%,rgba(139,92,246,.14),transparent 60%),linear-gradient(180deg,#080c16,#070a12);background-size:44px 44px,44px 44px,auto,auto,auto,auto}
-.wrap{max-width:1020px;margin:0 auto}
-.topbar{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-bottom:10px}
-.brand-mark{width:46px;height:46px;border-radius:14px;background:var(--grad);display:flex;align-items:center;justify-content:center;box-shadow:0 0 0 1px rgba(255,255,255,.16) inset,0 10px 26px rgba(99,102,241,.5);flex:none}
-.brand-mark svg{width:24px;height:24px}
-h1{font-size:23px;margin:0;letter-spacing:-.01em;font-weight:800}
-.subtitle{color:var(--muted);font-size:13px;margin:2px 0 0}
-.pill{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:700;letter-spacing:.04em;padding:5px 12px;border-radius:999px;border:1px solid var(--border);background:rgba(255,255,255,.05);color:var(--muted);white-space:nowrap}
-.pill.ok{color:var(--green);background:var(--green-bg);border-color:rgba(52,211,153,.35)}
-.pill.bad{color:var(--red);background:var(--red-bg);border-color:rgba(248,113,113,.35)}
-.pill.warn{color:var(--amber);background:var(--amber-bg);border-color:rgba(251,191,36,.35)}
-.pill.accent{color:#c7d2fe;background:rgba(99,102,241,.16);border-color:rgba(99,102,241,.4)}
-.card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:22px 24px;margin:18px 0;box-shadow:var(--shadow),inset 0 1px 0 rgba(255,255,255,.06);backdrop-filter:blur(10px)}
-.card h2{font-size:12px;font-weight:700;letter-spacing:.16em;text-transform:uppercase;color:var(--muted);margin:0 0 16px}
-.card h2 .count{color:var(--faint);letter-spacing:0;text-transform:none}
+html,body{margin:0;padding:0}
+body{min-height:100vh;background:var(--bg);color:var(--text);font-family:var(--sans);font-size:14px;line-height:1.55;-webkit-font-smoothing:antialiased;font-variant-numeric:tabular-nums}
+body.narrow{min-height:auto}
+.wrap{max-width:1440px;margin:0 auto;padding:24px 32px 64px}
+body.narrow .wrap{max-width:880px}
+.topbar{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:0 0 24px;padding:0 0 16px;border-bottom:1px solid var(--line)}
+.brand-mark{width:32px;height:32px;flex:none;display:flex;align-items:center;justify-content:center;border:1px solid var(--line);border-radius:8px;background:var(--surface);color:var(--accent)}
+.brand-mark svg{width:18px;height:18px}
+.topbar h1{font-size:20px;font-weight:500;letter-spacing:0;line-height:1.2;margin:0}
+.subtitle{font-size:13px;color:var(--muted);margin:2px 0 0}
+.ver{font-family:var(--mono);font-size:12px;color:var(--muted);margin-left:auto}
+h1,h2,h3{font-weight:500}
+.th{font-family:var(--mono);color:var(--text)}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:24px;margin:0 0 24px}
+.card h2{font-size:14px;color:var(--text-2);letter-spacing:0;text-transform:none;margin:0 0 16px}
+.card h2 .count{color:var(--muted);font-family:var(--mono);font-size:12px}
 .muted{color:var(--muted);font-size:13px}
-.bad{color:var(--red)} .ok{color:var(--green)} .warn{color:var(--amber)}
-a{color:#93c5fd;text-decoration:none} a:hover{text-decoration:underline}
-label{display:block;font-size:13px;color:var(--muted);margin:12px 0 4px}
-input,textarea{width:100%;background:rgba(255,255,255,.05);color:var(--text);border:1px solid var(--border);border-radius:12px;padding:12px 14px;font:inherit;font-size:14px;outline:none;transition:border-color .15s,box-shadow .15s}
-input:focus,textarea:focus{border-color:var(--accent);box-shadow:0 0 0 4px rgba(99,102,241,.18)}
-input:disabled{opacity:.55}
-textarea{resize:vertical}
-button{font:inherit;font-size:14px;font-weight:600;color:#fff;background:var(--grad);border:0;border-radius:12px;padding:11px 20px;cursor:pointer;margin:6px 8px 6px 0;box-shadow:0 6px 18px rgba(99,102,241,.38);transition:transform .12s,box-shadow .12s,opacity .12s}
-button:hover{transform:translateY(-1px);box-shadow:0 7px 20px rgba(99,102,241,.45)}
-button:focus-visible{outline:2px solid var(--accent2);outline-offset:2px}
-button:disabled{opacity:.55;cursor:wait;transform:none}
-button.ghost{background:rgba(255,255,255,.07);color:var(--text);box-shadow:none;border:1px solid var(--border)}
-button.ghost:hover{background:rgba(255,255,255,.12);box-shadow:none}
-button.danger{background:linear-gradient(135deg,#dc2626,#b91c1c);box-shadow:0 4px 14px rgba(220,38,38,.3)}
-table{width:100%;border-collapse:collapse;font-size:14px}
-thead th{position:sticky;top:0;background:var(--card-solid);font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);border-bottom:1px solid var(--border)}
-th,td{text-align:left;padding:13px 14px;border-bottom:1px solid rgba(255,255,255,.05);vertical-align:top}
-tbody tr{transition:background .12s} tbody tr:hover{background:rgba(255,255,255,.03)}
-tbody tr:last-child td{border-bottom:0}
-td button{padding:6px 11px;font-size:13px;margin:2px 4px 2px 0;box-shadow:none}
-.table-scroll{overflow-x:auto;margin:0 -4px;padding:0 4px}
-code{word-break:break-all;background:rgba(0,0,0,.4);padding:2px 7px;border-radius:6px;font-size:13px}
-pre{background:rgba(0,0,0,.4);border:1px solid var(--border);border-radius:10px;padding:14px;overflow:auto;font-size:13px;line-height:1.5;margin:12px 0}
+.bad{color:var(--negative)}.ok{color:var(--positive)}.warn{color:var(--warning)}
+a{color:var(--accent);text-decoration:none}
+a:hover{text-decoration:underline}
 .hidden{display:none!important}
-.row{display:flex;gap:14px;flex-wrap:wrap}.row>div{flex:1;min-width:200px}
-.stats{display:flex;gap:10px;flex-wrap:wrap;margin:14px 0 4px}
-.stat{flex:1;min-width:130px;background:var(--card);border:1px solid var(--border);border-radius:16px;padding:16px 18px}
-.stat .k{font-size:12px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted)}
-.stat .k::before{content:"";display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--grad);margin-right:7px;vertical-align:1px}
-.stat .v{font-size:26px;font-weight:800;letter-spacing:-.01em;margin-top:4px}
-.stat .s{font-size:12px;color:var(--faint);margin-top:2px}
-.login-wrap{max-width:440px;margin:48px auto 0}
-.login-card{text-align:center;padding:32px 28px}
-.lock{width:60px;height:60px;margin:0 auto 16px;border-radius:18px;background:var(--grad);display:flex;align-items:center;justify-content:center;box-shadow:0 8px 22px rgba(99,102,241,.45)}
-.lock svg{width:30px;height:30px}
-.login-card h2{font-size:18px;letter-spacing:0;text-transform:none;color:var(--text);margin:0 0 6px}
-.login-card .muted{margin:0 0 8px}
-.login-card input{text-align:center}
-.login-card button{width:100%;margin:12px 0 4px;padding:12px}
-#adminMsg{min-height:20px;margin:10px 0 0;font-size:13px}
-#adminMsg.err{color:var(--red)}
-.warn-card{border-color:rgba(251,191,36,.45);background:linear-gradient(180deg,rgba(251,191,36,.09),rgba(251,191,36,.02))}
-.warn-card h2{color:var(--amber)}
-.cmd{display:flex;align-items:center;gap:10px;background:rgba(0,0,0,.45);border:1px solid var(--border);border-radius:10px;padding:12px 14px;margin:12px 0;font-size:14px;overflow-x:auto}
+button{font:inherit;font-size:14px;font-weight:500;line-height:1.2;color:var(--btn-ink);background:var(--text);border:1px solid transparent;border-radius:8px;padding:12px 16px;margin:0;cursor:pointer;transition:background-color .15s var(--ease),border-color .15s var(--ease),color .15s var(--ease)}
+button:hover{background:var(--text-2)}
+button:active{transform:scale(.98)}
+button:focus-visible,input:focus-visible,textarea:focus-visible,a:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+button.ghost{background:var(--raised);border-color:var(--line);color:var(--text)}
+button.ghost:hover{background:var(--line-2);border-color:var(--line-2);color:var(--text)}
+button.danger{background:transparent;border-color:var(--negative);color:var(--negative)}
+button.danger:hover{background:var(--raised);color:var(--negative)}
+button.big{padding:12px 20px}
+button:disabled{opacity:.5;cursor:wait}
+label{display:block;font-size:13px;color:var(--text-2);margin:0 0 8px}
+input,textarea{width:100%;background:var(--bg);color:var(--text);border:1px solid var(--line);border-radius:8px;padding:12px;font:inherit;font-size:14px;outline:none;transition:border-color .15s var(--ease)}
+input:focus,textarea:focus{border-color:var(--accent)}
+textarea{resize:vertical}
+code{font-family:var(--mono);font-size:13px;background:var(--raised);padding:2px 6px;border-radius:4px;word-break:break-all}
+pre{background:var(--raised);border:1px solid var(--line);border-radius:8px;padding:16px;overflow:auto;font-family:var(--mono);font-size:13px;line-height:1.5;margin:16px 0}
+.stats{display:flex;flex-wrap:wrap;background:var(--surface);border:1px solid var(--line);border-radius:12px;margin:0 0 24px;overflow:hidden}
+.stat{flex:1 1 0;min-width:180px;padding:20px 24px;border-right:1px solid var(--line)}
+.stat:last-child{border-right:0}
+.stat .k{font-size:12px;color:var(--muted)}
+.stat .v{font-family:var(--mono);font-size:30px;font-weight:500;line-height:1.1;margin:8px 0 0;font-variant-numeric:tabular-nums}
+.stat .s{font-size:12px;color:var(--muted);margin:4px 0 0}
+.table-scroll{overflow-x:auto}
+table{width:100%;border-collapse:collapse;font-size:14px}
+thead th{position:static;background:transparent;font-size:12px;font-weight:400;color:var(--muted);text-align:left;padding:12px 16px;border-bottom:1px solid var(--line);text-transform:none;letter-spacing:0}
+th,td{text-align:left;padding:12px 16px;border-bottom:1px solid var(--line);vertical-align:middle}
+tbody tr:hover{background:var(--raised)}
+tbody tr:last-child td{border-bottom:0}
+td button{padding:8px 12px;font-size:12px;margin:0 4px 4px 0}
+td button:last-child{margin-right:0}
+.pill{display:inline-flex;align-items:center;gap:8px;font-size:12px;font-weight:400;color:var(--text-2);background:none;border:0;border-radius:0;padding:0;white-space:nowrap}
+.pill::before{content:"";width:6px;height:6px;border-radius:50%;background:var(--muted);flex:none}
+.pill.ok::before{background:var(--positive)}
+.pill.bad::before{background:var(--negative)}
+.pill.warn::before{background:var(--warning)}
+.pill.accent::before{background:var(--accent)}
+.bar{height:4px;background:var(--raised);border-radius:2px;overflow:hidden;margin:8px 0 0}
+.bar i{display:block;height:100%;background:var(--accent);border-radius:2px}
+.sub-row{display:flex;align-items:center;gap:12px;background:var(--raised);border:1px solid var(--line);border-radius:8px;padding:12px 16px;margin:12px 0}
+.sub-row::before{content:"";width:6px;height:6px;border-radius:50%;background:var(--accent);flex:none}
+.sub-row .lbl{flex:none;font-size:12px;color:var(--muted);width:auto}
+.sub-row code{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;background:none;padding:0;font-size:13px;color:var(--text)}
+.sub-row code a{color:var(--text)}
+.sub-row button{flex:none;margin:0}
+.actions{display:flex;flex-wrap:wrap;gap:8px;margin:20px 0 0}
+.msg{font-size:13px;color:var(--text-2);margin:12px 0 0;padding:0;background:none;border:0;min-height:0}
+.msg.err{color:var(--negative);background:none}
+.msg.ok{color:var(--positive);background:none}
+.msg:empty{display:none}
+.warn-card{border-color:var(--line-2)}
+.big-num{font-family:var(--mono);font-size:28px;font-weight:500;line-height:1.1;margin:8px 0}
+.divider{display:flex;align-items:center;gap:12px;color:var(--muted);font-size:12px;margin:20px 0}
+.divider::before,.divider::after{content:"";flex:1;height:1px;background:var(--line)}
+.login-wrap{max-width:400px;margin:40px auto 0}
+.login-card{text-align:left}
+.login-card input{text-align:left}
+.lock{width:36px;height:36px;display:flex;align-items:center;justify-content:center;border:1px solid var(--line);border-radius:8px;background:var(--raised);color:var(--text-2);margin:0 0 20px}
+.lock svg{width:18px;height:18px}
+.login-card h2{font-size:18px;color:var(--text)}
+.login-card .muted{margin:0 0 20px}
+.login-card button{width:100%;margin:16px 0 0}
+#adminMsg{min-height:20px;margin:12px 0 0;font-size:13px;color:var(--text-2)}
+#adminMsg.err{color:var(--negative)}
+.cmd{display:flex;align-items:center;gap:12px;background:var(--raised);border:1px solid var(--line);border-radius:8px;padding:12px 16px;margin:12px 0;font-family:var(--mono);font-size:13px;overflow-x:auto}
 .cmd code{background:none;padding:0;white-space:nowrap}
 .cmd button{margin:0 0 0 auto;flex:none}
-.form-grid{display:grid;grid-template-columns:1fr 1fr;gap:4px 16px}
-.msg{font-size:13px;color:var(--muted);margin:10px 0 0;padding:9px 12px;border-radius:10px;border:1px solid transparent;background:rgba(99,102,241,.08)}
-.msg.err{color:var(--red)} .msg.ok{color:var(--green)}
-.section-head{display:flex;align-items:baseline;justify-content:space-between;gap:10px;flex-wrap:wrap}
-/* tab navigation: one section at a time instead of one long scroll */
-.tabs{display:flex;gap:6px;margin:18px 0 4px;padding:5px;background:var(--card);border:1px solid var(--border);border-radius:14px;position:sticky;top:8px;z-index:30;backdrop-filter:blur(12px)}
-.tabs button.tab{flex:1;margin:0;padding:10px 8px;text-align:center;background:transparent;color:var(--muted);box-shadow:none;border:1px solid transparent;border-radius:10px;font-size:14px;font-weight:600}
-.tabs button.tab:hover{background:rgba(255,255,255,.07);color:var(--text);transform:none;box-shadow:none}
-.tabs button.tab.active{background:var(--grad);color:#fff;box-shadow:0 4px 14px rgba(99,102,241,.35)}
-html[data-theme="light"] .tabs button.tab:hover{background:rgba(15,23,42,.05)}
-.panel{animation:panelIn .18s ease}
-@keyframes panelIn{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:none}}
-/* status messages: colored, readable feedback bar */
-.msg.ok{color:var(--green);background:var(--green-bg);border-color:rgba(52,211,153,.32)}
-.msg.err{color:var(--red);background:var(--red-bg);border-color:rgba(248,113,113,.32)}
-.msg:empty{display:none}
-/* health strip: a compact status bar under the stats */
-.healthline{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:12px 0;padding:11px 16px;background:var(--card);border:1px solid var(--border);border-radius:14px}
+.row{display:flex;gap:16px;flex-wrap:wrap;margin:0 0 16px}
+.row>div{flex:1;min-width:200px}
+.form-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin:0 0 16px}
+.section-head{display:flex;align-items:baseline;justify-content:space-between;gap:12px;flex-wrap:wrap}
+.healthline{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:0 0 20px;padding:12px 16px;background:var(--surface);border:1px solid var(--line);border-radius:8px}
 .healthline .muted{margin-right:auto}
-.healthline button{margin:0}
-/* empty table state */
-.empty{padding:30px 14px;text-align:center;color:var(--faint)}
-.empty::before{content:"";display:block;width:34px;height:34px;margin:0 auto 10px;border-radius:11px;background:var(--card);border:1px solid var(--border)}
-@media (max-width:640px){body{padding:18px 12px 36px}.card{padding:16px}.form-grid{grid-template-columns:1fr}.stat{min-width:calc(50% - 6px)}.topbar{flex-wrap:nowrap}.topbar h1{font-size:19px}.brand-mark{width:38px;height:38px;border-radius:11px}.topbar .pill{display:none}.topbar #btnTheme{margin-left:auto}.tabs button.tab{font-size:13px;padding:9px 4px}.healthline{padding:10px 12px}}
-</style></head><body><div class="wrap">
-<div class="topbar"><div class="brand-mark"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 3 7v6c0 5 4 8 9 9 5-1 9-4 9-9V7l-9-5z"/><path d="M9 12l2 2 4-4"/></svg></div><div><h1>后台管理</h1><p class="subtitle">EMOS 订阅网关 · 只有站长能进</p></div><span class="pill accent" style="margin-left:auto">站长后台 · {{VERSION}}</span><button type="button" class="ghost" id="btnTheme" style="margin:0 0 0 8px">白天模式</button></div>
-<p class="muted">管理节点、分享链接与设置，改动立即生效。</p>
+.tabs{display:flex;gap:0;margin:0 0 24px;border-bottom:1px solid var(--line)}
+.tabs button.tab{background:none;border:0;border-bottom:2px solid transparent;border-radius:0;color:var(--muted);padding:12px 20px;font-size:14px;font-weight:400;margin:0}
+.tabs button.tab:hover{background:none;color:var(--text);transform:none}
+.tabs button.tab.active{background:none;color:var(--text);border-bottom-color:var(--accent)}
+.empty{padding:32px 16px;text-align:center;color:var(--muted);font-size:13px}
+@media (max-width:640px){
+ .wrap{padding:16px 16px 48px}
+ .card{padding:16px}
+ .stat{padding:16px}
+ .stat .v{font-size:22px}
+ .topbar h1{font-size:18px}
+ .form-grid{grid-template-columns:1fr}
+ .row{flex-direction:column;gap:0}
+ .node-table{overflow:visible;margin:0;padding:0}
+ .node-table thead{display:none}
+ .node-table table,.node-table tbody,.node-table tr,.node-table td{display:block;width:100%}
+ .node-table tr{border:1px solid var(--line);border-radius:8px;padding:4px 12px;margin:12px 0;background:var(--surface)}
+ .node-table td{border-bottom:1px solid var(--line);padding:10px 0}
+ .node-table td:last-child{border-bottom:0}
+ .node-table td[data-label]:not([data-label=""])::before{content:attr(data-label);display:block;font-size:11px;color:var(--muted);margin-bottom:4px}
+ .sub-row{flex-wrap:wrap}
+ .sub-row .lbl{width:100%}
+ .sub-row code{white-space:normal}
+}`;
+
+const ADMIN_HTML = `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>后台管理 · EMOS 订阅网关</title><script>try{var t=localStorage.getItem("emos-theme");if(t==="light"||t==="dark")document.documentElement.setAttribute("data-theme",t)}catch(e){}</script><style>${UI_CSS}</style></head><body><div class="wrap">
+<div class="topbar"><div class="brand-mark"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h5l4 5h7"/><circle cx="4" cy="6" r="1.6"/><circle cx="20" cy="11" r="1.6"/><path d="M4 18h16"/></svg></div><div><h1>后台管理</h1><p class="subtitle">EMOS 订阅网关 · 只有站长能进</p></div><span class="ver">{{VERSION}}</span><button type="button" class="ghost" id="btnTheme">白天模式</button></div>
+<p class="muted">管理节点、分享链接与设置，保存后立即生效。</p>
 
 <div class="card warn-card hidden" id="unconfiguredCard"><h2>后台未配置</h2>
-<p style="margin:0 0 6px">服务器启动时未设置 <code>ADMIN_TOKEN</code>。</p>
-<p class="muted" style="margin:0 0 4px">用以下命令重新启动（替换为你的口令），然后重新打开 /admin：</p>
+<p>服务器启动时未设置 <code>ADMIN_TOKEN</code>。</p>
+<p class="muted">用以下命令重新启动（替换为你的口令），然后重新打开 /admin：</p>
 <div class="cmd"><code>ADMIN_TOKEN=你的口令 node server.js</code><button type="button" class="ghost" id="btnCopyCmd">复制</button></div>
-<p class="muted" style="margin:0">也可以用控制脚本：<code>./manage.sh install --admin-token 你的口令</code>。口令不要写进任何文件或聊天记录。</p>
+<p class="muted">也可以用控制脚本：<code>./manage.sh install --admin-token 你的口令</code>。口令不要写进任何文件或聊天记录。</p>
 <p><button type="button" id="btnRecheck">重新检查</button></p></div>
 
 <div class="login-wrap hidden" id="loginWrap"><div class="card login-card" id="loginCard">
-<div class="lock"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg></div>
+<div class="lock"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg></div>
 <h2>站长登录</h2><p class="muted">输入管理员口令（ADMIN_TOKEN）</p>
-<label for="adminToken" style="text-align:left">管理员口令</label>
+<label for="adminToken">管理员口令</label>
 <input id="adminToken" type="password" placeholder="输入 ADMIN_TOKEN" autocomplete="off">
 <button type="button" id="btnAdminLogin">登录</button>
 <p id="adminMsg" class="muted"></p></div></div>
@@ -1942,7 +1973,7 @@ html[data-theme="light"] .tabs button.tab:hover{background:rgba(15,23,42,.05)}
 
 <div class="card panel" data-panel="nodes"><div class="section-head"><h2>节点 <span class="count" id="nodeCount"></span></h2><span class="pill" id="probeNote"></span></div>
 <div class="table-scroll"><table><thead><tr><th>Key</th><th>名称</th><th>到期</th><th>协议</th><th>服务器</th><th>探针</th><th>操作</th></tr></thead><tbody id="nodeRows"></tbody></table></div>
-<h2 id="formTitle" style="margin-top:24px">添加节点</h2>
+<h2 id="formTitle">添加节点</h2>
 <label>节点链接（hy2:// / hysteria2:// / vless://）</label>
 <textarea id="nodeLink" rows="3" placeholder="hysteria2://密码@域名:端口?sni=域名&obfs=salamander&obfs-password=xxx#名字"></textarea>
 <div class="row"><div><label>显示名（可选）</label><input id="nodeName" placeholder="例如 PSM-sb-hy2-opju"></div>
@@ -1950,13 +1981,13 @@ html[data-theme="light"] .tabs button.tab:hover{background:rgba(15,23,42,.05)}
 <div class="row"><div><label>探针 id（可选）</label><input id="nodeProbe" type="number" placeholder="20"></div>
 <div><label>Key（可选，自动生成）</label><input id="nodeKey" placeholder="hy2-jp-xxx"></div></div>
 <div class="row"><div><label>到期时间（可选，如 2027-11-14）</label><input id="nodeExpiry" type="date"></div></div>
-<button type="button" id="btnParse">解析预览</button> <button type="button" id="btnSaveNode">保存节点</button> <button type="button" class="ghost hidden" id="btnCancelEdit">取消编辑</button>
+<div class="actions"><button type="button" id="btnParse">解析预览</button> <button type="button" id="btnSaveNode">保存节点</button> <button type="button" class="ghost hidden" id="btnCancelEdit">取消编辑</button></div>
 <pre id="nodePreview" class="hidden"></pre><p id="nodeMsg" class="msg"></p></div>
 
-<div class="card panel hidden" data-panel="shares"><h2>分享链接（订阅）</h2>
-<p class="muted" style="margin-top:0">用户登录后自动创建，每人一条；Token 仅显示前 6 位。</p>
+<div class="card panel hidden" data-panel="shares"><h2>分享链接</h2>
+<p class="muted">用户登录后自动创建，每人一条；Token 仅显示前 6 位。</p>
 <div class="table-scroll"><table><thead><tr><th>Token</th><th>用户</th><th>创建 / 到期</th><th>状态</th><th>访问</th><th>最后 IP / 访问</th><th>操作</th></tr></thead><tbody id="shareRows"></tbody></table></div>
-<p><button type="button" class="danger" id="btnRevokeAll">全部吊销（所有订阅立即失效）</button></p><p id="shareMsg" class="msg"></p></div>
+<p class="actions"><button type="button" class="danger" id="btnRevokeAll">全部吊销</button></p><p id="shareMsg" class="msg"></p></div>
 
 <div class="card panel hidden" data-panel="settings"><h2>设置</h2>
 <div class="form-grid">
@@ -2149,91 +2180,11 @@ initAdmin();
 </script></body></html>`;
 
 // --- console HTML (single page, no dependencies) -------------------------
-const HTML = `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>EMOS 订阅控制台</title><script>try{var t=localStorage.getItem("emos-theme");if(t==="light"||t==="dark")document.documentElement.setAttribute("data-theme",t)}catch(e){}</script><style>
-:root{--bg:#070b14;--card:rgba(255,255,255,.04);--card-solid:#101728;--border:rgba(255,255,255,.08);--text:#f1f5f9;--muted:#8b98ad;--faint:#5b6b82;--accent:#6366f1;--accent2:#22d3ee;--grad:linear-gradient(135deg,#6366f1,#8b5cf6 48%,#22d3ee);--green:#34d399;--green-bg:rgba(52,211,153,.13);--red:#f87171;--red-bg:rgba(248,113,113,.13);--amber:#fbbf24;--amber-bg:rgba(251,191,36,.12);--radius:20px;--shadow:0 16px 40px rgba(0,0,0,.42)}
-html[data-theme="light"]{--bg:#edf1f7;--card:rgba(255,255,255,.86);--card-solid:#ffffff;--border:rgba(15,23,42,.09);--text:#0f172a;--muted:#5f6f88;--faint:#94a3b8;--accent:#4f46e5;--accent2:#0891b2;--green:#059669;--green-bg:rgba(5,150,105,.12);--red:#dc2626;--red-bg:rgba(220,38,38,.08);--amber:#b45309;--amber-bg:rgba(180,83,9,.1);--shadow:0 14px 32px rgba(15,23,42,.10)}
-html[data-theme="light"] body{background:linear-gradient(rgba(15,23,42,.028) 1px,transparent 1px),linear-gradient(90deg,rgba(15,23,42,.028) 1px,transparent 1px),radial-gradient(1000px 520px at 10% -10%,rgba(99,102,241,.14),transparent 60%),radial-gradient(820px 500px at 95% -5%,rgba(34,211,238,.10),transparent 55%),linear-gradient(180deg,#f8fafc,#e9eef5);background-size:44px 44px,44px 44px,auto,auto,auto}
-html[data-theme="light"] .pill{background:rgba(15,23,42,.05)}
-html[data-theme="light"] .pill.accent{color:#4338ca;background:rgba(79,70,229,.1);border-color:rgba(79,70,229,.35)}
-html[data-theme="light"] a{color:#1d4ed8}
-html[data-theme="light"] input,html[data-theme="light"] textarea{background:rgba(255,255,255,.7)}
-html[data-theme="light"] button.ghost{background:rgba(15,23,42,.05)}
-html[data-theme="light"] button.ghost:hover{background:rgba(15,23,42,.09)}
-html[data-theme="light"] th,html[data-theme="light"] td{border-bottom-color:rgba(15,23,42,.07)}
-html[data-theme="light"] tbody tr:hover{background:rgba(15,23,42,.03)}
-html[data-theme="light"] code{background:rgba(15,23,42,.07)}
-html[data-theme="light"] pre{background:rgba(15,23,42,.05)}
-html[data-theme="light"] .bar{background:rgba(15,23,42,.1)}
-html[data-theme="light"] .stat{background:rgba(255,255,255,.7)}
-html[data-theme="light"] .sub-row{background:rgba(255,255,255,.7)}
-html[data-theme="light"] .cmd{background:rgba(15,23,42,.05)}
-*{box-sizing:border-box}
-body::before{content:"";position:fixed;top:0;left:0;right:0;height:2px;background:var(--grad);z-index:50}
-::selection{background:rgba(99,102,241,.35)}
-body{margin:0;padding:28px 20px 48px;min-height:100vh;color:var(--text);font-family:system-ui,-apple-system,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;font-size:15px;line-height:1.6;background:linear-gradient(rgba(255,255,255,.022) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,.022) 1px,transparent 1px),radial-gradient(1000px 520px at 10% -10%,rgba(99,102,241,.32),transparent 60%),radial-gradient(820px 500px at 95% -5%,rgba(34,211,238,.16),transparent 55%),radial-gradient(720px 520px at 50% 115%,rgba(139,92,246,.14),transparent 60%),linear-gradient(180deg,#080c16,#070a12);background-size:44px 44px,44px 44px,auto,auto,auto,auto}
-.wrap{max-width:920px;margin:0 auto}
-.topbar{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-bottom:10px}
-.brand-mark{width:46px;height:46px;border-radius:14px;background:var(--grad);display:flex;align-items:center;justify-content:center;box-shadow:0 0 0 1px rgba(255,255,255,.16) inset,0 10px 26px rgba(99,102,241,.5);flex:none}
-.brand-mark svg{width:24px;height:24px}
-h1{font-size:23px;margin:0;letter-spacing:-.01em;font-weight:800}
-.subtitle{color:var(--muted);font-size:13px;margin:2px 0 0}
-.pill{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:700;letter-spacing:.04em;padding:5px 12px;border-radius:999px;border:1px solid var(--border);background:rgba(255,255,255,.05);color:var(--muted);white-space:nowrap}
-.pill.ok{color:var(--green);background:var(--green-bg);border-color:rgba(52,211,153,.35)}
-.pill.bad{color:var(--red);background:var(--red-bg);border-color:rgba(248,113,113,.35)}
-.pill.warn{color:var(--amber);background:var(--amber-bg);border-color:rgba(251,191,36,.35)}
-.pill.accent{color:#c7d2fe;background:rgba(99,102,241,.16);border-color:rgba(99,102,241,.4)}
-.card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:22px 24px;margin:18px 0;box-shadow:var(--shadow),inset 0 1px 0 rgba(255,255,255,.06);backdrop-filter:blur(10px)}
-.card h2{font-size:12px;font-weight:700;letter-spacing:.16em;text-transform:uppercase;color:var(--muted);margin:0 0 16px}
-.muted{color:var(--muted);font-size:13px}
-.bad{color:var(--red)} .ok{color:var(--green)} .warn{color:var(--amber)}
-a{color:#93c5fd;text-decoration:none} a:hover{text-decoration:underline}
-label{display:block;font-size:13px;color:var(--muted);margin:12px 0 4px}
-input{width:100%;background:rgba(255,255,255,.05);color:var(--text);border:1px solid var(--border);border-radius:12px;padding:12px 14px;font:inherit;font-size:14px;outline:none;transition:border-color .15s,box-shadow .15s}
-input:focus{border-color:var(--accent);box-shadow:0 0 0 4px rgba(99,102,241,.18)}
-button{font:inherit;font-size:14px;font-weight:600;color:#fff;background:var(--grad);border:0;border-radius:12px;padding:11px 20px;cursor:pointer;margin:6px 8px 6px 0;box-shadow:0 6px 18px rgba(99,102,241,.38);transition:transform .12s,box-shadow .12s,opacity .12s}
-button:hover{transform:translateY(-1px);box-shadow:0 7px 20px rgba(99,102,241,.45)}
-button:focus-visible{outline:2px solid var(--accent2);outline-offset:2px}
-button:disabled{opacity:.55;cursor:wait;transform:none}
-button.ghost{background:rgba(255,255,255,.07);color:var(--text);box-shadow:none;border:1px solid var(--border)}
-button.ghost:hover{background:rgba(255,255,255,.12);box-shadow:none}
-button.big{font-size:16px;padding:14px 24px;width:100%;margin:6px 0}
-.hero{text-align:center;padding:36px 28px;background:linear-gradient(180deg,rgba(99,102,241,.12),rgba(99,102,241,.02) 70%)}
-.hero h2{font-size:18px;letter-spacing:0;text-transform:none;color:var(--text);margin:0 0 6px}
-.hero .muted{margin:0 0 14px}
-.divider{display:flex;align-items:center;gap:12px;color:var(--faint);font-size:12px;letter-spacing:.08em;margin:18px 0 4px}
-.divider::before,.divider::after{content:"";flex:1;height:1px;background:var(--border)}
-.fallback{text-align:left;margin-top:6px}
-table{width:100%;border-collapse:collapse;font-size:14px}
-thead th{position:sticky;top:0;background:var(--card-solid);font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);border-bottom:1px solid var(--border)}
-th,td{text-align:left;padding:13px 14px;border-bottom:1px solid rgba(255,255,255,.05);vertical-align:top}
-tbody tr{transition:background .12s} tbody tr:hover{background:rgba(255,255,255,.03)}
-tbody tr:last-child td{border-bottom:0}
-.table-scroll{overflow-x:auto;margin:0 -4px;padding:0 4px}
-.bar{height:6px;background:rgba(255,255,255,.08);border-radius:99px;overflow:hidden;margin-top:8px}
-.bar i{display:block;height:100%;background:var(--grad);border-radius:99px}
-code{word-break:break-all;background:rgba(0,0,0,.4);padding:2px 7px;border-radius:6px;font-size:13px}
-.hidden{display:none!important}
-.stats{display:flex;gap:10px;flex-wrap:wrap;margin:4px 0 14px}
-.stat{flex:1;min-width:130px;background:rgba(0,0,0,.30);border:1px solid var(--border);border-radius:16px;padding:16px 18px}
-.stat .k{font-size:12px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted)}
-.stat .k::before{content:"";display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--grad);margin-right:7px;vertical-align:1px}
-.stat .v{font-size:26px;font-weight:800;letter-spacing:-.01em;margin-top:4px}
-.stat .s{font-size:12px;color:var(--faint);margin-top:2px}
-.sub-row{display:flex;align-items:center;gap:10px;background:linear-gradient(90deg,rgba(99,102,241,.14),rgba(34,211,238,.07));border:1px solid rgba(99,102,241,.30);border-radius:12px;padding:12px 14px;margin:8px 0}
-.sub-row .lbl{flex:none;font-size:13px;color:var(--muted);width:172px}
-.sub-row code{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;background:none;padding:0}
-.sub-row button{flex:none;margin:0;padding:7px 13px;font-size:13px}
-.warn-card{border-color:rgba(251,191,36,.45);background:linear-gradient(180deg,rgba(251,191,36,.09),rgba(251,191,36,.02))}
-.warn-card h2{color:var(--amber)}
-.big-num{font-size:34px;font-weight:800;line-height:1.1;margin:6px 0}
-.actions{display:flex;flex-wrap:wrap;gap:2px;margin-top:12px}
-.msg{font-size:13px;color:var(--muted);margin:10px 0 0;min-height:18px}
-@media (max-width:640px){body{padding:18px 12px 36px}.card{padding:16px}.stat{min-width:calc(50% - 6px)}.sub-row{flex-wrap:wrap}.sub-row .lbl{width:100%}.sub-row code{white-space:normal}.topbar{flex-wrap:nowrap}.topbar h1{font-size:19px}.brand-mark{width:38px;height:38px;border-radius:11px}.topbar .pill{display:none}.topbar #btnTheme{margin-left:auto}.node-table{overflow:visible;margin:0;padding:0}.node-table thead{display:none}.node-table table,.node-table tbody,.node-table tr,.node-table td{display:block;width:100%}.node-table tr{border:1px solid var(--border);border-radius:14px;padding:4px 14px;margin:12px 0;background:var(--card-solid)}.node-table td{border-bottom:1px solid var(--border);padding:10px 0}.node-table td:last-child{border-bottom:0}.node-table td[data-label]:not([data-label=""])::before{content:attr(data-label);display:block;font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);margin-bottom:2px}}
-</style></head><body><div class="wrap">
-<div class="topbar"><div class="brand-mark"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 4 14h6l-1 8 9-12h-6l1-8z"/></svg></div><div><h1>EMOS 订阅控制台</h1><p class="subtitle">EMOS 登录 · 萝卜 &gt; <span class="th">500</span> 解锁订阅</p></div><span class="pill accent" style="margin-left:auto">{{VERSION}}</span><button type="button" class="ghost" id="btnTheme" style="margin:0 0 0 8px">白天模式</button></div>
+const HTML = `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>EMOS 订阅控制台</title><script>try{var t=localStorage.getItem("emos-theme");if(t==="light"||t==="dark")document.documentElement.setAttribute("data-theme",t)}catch(e){}</script><style>${UI_CSS}</style></head><body><div class="wrap">
+<div class="topbar"><div class="brand-mark"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h5l4 5h7"/><circle cx="4" cy="6" r="1.6"/><circle cx="20" cy="11" r="1.6"/><path d="M4 18h16"/></svg></div><div><h1>EMOS 订阅控制台</h1><p class="subtitle">核验 EMOS 萝卜余额，领取你的专属订阅链接</p></div><span class="ver">{{VERSION}}</span><button type="button" class="ghost" id="btnTheme">白天模式</button></div>
 
-<div class="card hero" id="loginCard"><h2>登录</h2>
-<p class="muted">用你的 EMOS 账号登录，核验萝卜后进入控制台</p>
+<div class="card" id="loginCard"><h2>登录</h2>
+<p class="muted">用 EMOS 账号登录，核验萝卜后进入控制台</p>
 <p><a href="/auth/emos"><button type="button" class="big">用 EMOS 账号登录</button></a></p>
 <div class="divider">或使用 Token 登录</div>
 <div class="fallback">
@@ -2251,15 +2202,16 @@ code{word-break:break-all;background:rgba(0,0,0,.4);padding:2px 7px;border-radiu
 <div class="stat"><div class="k">订阅访问</div><div class="v" id="statAccess">—</div><div class="s">本条链接</div></div>
 </div>
 <div class="card"><h2>节点 · 总流量</h2><div class="table-scroll node-table"><table><thead><tr><th>节点</th><th>到期</th><th>状态</th><th>今日</th><th>本月已用 / 限额</th></tr></thead><tbody id="nodeRows"></tbody></table></div></div>
-<div class="card"><h2>已达标</h2><p>用户：<code id="who"></code> · 萝卜：<b id="carrotOut"></b>（门槛 &gt; <span class="th">500</span>）</p>
+<div class="card"><h2>订阅链接</h2><p>用户：<code id="who"></code> · 萝卜：<b id="carrotOut"></b>（门槛 &gt; <span class="th">500</span>）</p>
 <p class="muted">订阅链接（每人专属，粘贴到客户端即可）：</p>
-<div class="sub-row"><span class="lbl">订阅链接</span><code id="subAuto"></code><button type="button" id="btnCopyAuto">复制</button></div>
+<div class="sub-row"><span class="lbl">订阅地址</span><code id="subAuto"></code><button type="button" id="btnCopyAuto">复制</button></div>
 <p class="muted">一条链接全客户端通用，服务端按客户端自动识别格式（FlClash / Clash Verge 返回 Clash，sing-box / Hiddify / Karing 返回 JSON，Surge 返回 Surge 配置，Shadowrocket、Loon 等返回通用链接列表）。</p>
 <p class="muted" id="shareInfo"></p>
-<div class="actions"><button type="button" id="btnImport">一键导入</button> <button type="button" class="ghost" id="btnRefresh">刷新流量</button> <button type="button" class="ghost" id="btnRotate">刷新订阅链接（旧链接立即失效）</button> <button type="button" class="ghost" id="btnDisable">停用订阅链接</button> <button type="button" class="ghost" id="btnLogout">退出登录</button></div>
+<div class="actions"><button type="button" id="btnImport">一键导入</button> <button type="button" class="ghost" id="btnRefresh">刷新流量</button> <button type="button" class="ghost" id="btnRotate">轮换链接</button> <button type="button" class="ghost" id="btnDisable">停用链接</button> <button type="button" class="ghost" id="btnLogout">退出登录</button></div>
 <p class="muted" id="copyMsg"></p></div>
 </div>
-</div><script>
+</div>
+<script>
 function applyTheme(t){document.documentElement.setAttribute("data-theme",t);var b=document.getElementById("btnTheme");if(b)b.textContent=t==="light"?"夜间模式":"白天模式";try{localStorage.setItem("emos-theme",t)}catch(e){}}
 document.getElementById("btnTheme").onclick=function(){applyTheme(document.documentElement.getAttribute("data-theme")==="light"?"dark":"light")};
 applyTheme(document.documentElement.getAttribute("data-theme")||"dark");
