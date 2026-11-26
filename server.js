@@ -1,4 +1,4 @@
-// EMOS-gated sing-box gateway v1.3.0 — zero dependencies.
+// EMOS-gated sing-box gateway v1.3.1 — zero dependencies.
 // Node >= 18 (uses global fetch). Run: node server.js  (PORT env, default 3000)
 // Scope: EMOS login -> carrot > 500 -> console (nodes + per-user sub links)
 // + NODE TOTAL traffic only, from https://1e.lol/api/nodes. NO per-user traffic.
@@ -14,7 +14,7 @@ const path = require('path');
 const crypto = require('crypto');
 
 const PORT = parseInt(process.env.PORT || '3000', 10);
-const VERSION = '1.3.0';
+const VERSION = '1.3.1';
 const CONFIG_PATH = path.join(__dirname, 'config', 'nodes.json');
 const CLASH_TEMPLATE_PATH = path.join(__dirname, 'config', 'templates', 'clash.yaml');
 const SINGBOX_TEMPLATE_PATH = path.join(__dirname, 'config', 'templates', 'singbox.json');
@@ -91,9 +91,9 @@ let SINGBOX_TEMPLATE = loadTemplate(SINGBOX_TEMPLATE_PATH, BUILTIN_SINGBOX_TEMPL
 // ONLY used when the live probe fetch fails; responses are labelled sample:true.
 // Never present these as live data.
 const SAMPLE_PROBE = [
-  { id: 2, name: 'Nuyek', country: 'US', online: true, day_rx: 1170645409, day_tx: 303375558, month_rx: 14030933662, month_tx: 4589289084, month_used: 18620222746, traffic_limit: 8796093022208, traffic_mode: 'sum', traffic_reset_day: 1, month_start: '2026-11-01', metrics: { cpu: 0, net_rx: 26259, net_tx: 2520, uptime: 125458 } },
-  { id: 22, name: 'Raksmart', country: 'US', online: true, day_rx: 106716302, day_tx: 114857291, month_rx: 8803404166, month_tx: 7768455587, month_used: 16571859753, traffic_limit: 1099511627776, traffic_mode: 'sum', traffic_reset_day: 1, month_start: '2026-11-01', metrics: { cpu: 1.0, net_rx: 2410, net_tx: 2671, uptime: 86356 } },
-  { id: 20, name: '伤心的云', country: 'HK', online: true, day_rx: 34698138, day_tx: 43898440, month_rx: 40575411285, month_tx: 42388808469, month_used: 82964219754, traffic_limit: 1099511627776, traffic_mode: 'sum', traffic_reset_day: 1, month_start: '2026-11-01', metrics: { cpu: 1.0, net_rx: 264, net_tx: 774, uptime: 125073 } },
+  { id: 2, name: 'Nuyek', country: 'US', online: true, expires_at: '2027-11-14', day_rx: 1170645409, day_tx: 303375558, month_rx: 14030933662, month_tx: 4589289084, month_used: 18620222746, traffic_limit: 8796093022208, traffic_mode: 'sum', traffic_reset_day: 1, month_start: '2026-11-01', metrics: { cpu: 0, net_rx: 26259, net_tx: 2520, uptime: 125458 } },
+  { id: 22, name: 'Raksmart', country: 'US', online: true, expires_at: '2026-12-25', day_rx: 106716302, day_tx: 114857291, month_rx: 8803404166, month_tx: 7768455587, month_used: 16571859753, traffic_limit: 1099511627776, traffic_mode: 'sum', traffic_reset_day: 1, month_start: '2026-11-01', metrics: { cpu: 1.0, net_rx: 2410, net_tx: 2671, uptime: 86356 } },
+  { id: 20, name: '伤心的云', country: 'HK', online: true, expires_at: '2026-12-22', day_rx: 34698138, day_tx: 43898440, month_rx: 40575411285, month_tx: 42388808469, month_used: 82964219754, traffic_limit: 1099511627776, traffic_mode: 'sum', traffic_reset_day: 1, month_start: '2026-11-01', metrics: { cpu: 1.0, net_rx: 264, net_tx: 774, uptime: 125073 } },
 ];
 
 const sessions = new Map(); // sessionId -> {user_id, username, carrot, emosToken, demo, expiresAt, lastCarrotCheck, shareToken}
@@ -285,7 +285,7 @@ function nodeAdminView(n, probeMap) {
     server: parsed ? parsed.server : null, server_port: parsed ? parsed.server_port : null,
     sni: parsed ? (parsed.sni || (parsed.tls && parsed.tls.server_name) || null) : null,
     link_name: parsed ? parsed.tag : null,
-    probe_node_id: n.probe_node_id ?? null, probe_name: p ? p.name : (n.probe_name || null), expires_at: normalizeExpiry(n.expires_at),
+    probe_node_id: n.probe_node_id ?? null, probe_name: p ? p.name : (n.probe_name || null), expires_at: normalizeExpiry(n.expires_at), expires_at_probe: normalizeExpiry(p ? p.expires_at : null),
     online: p ? !!p.online : null, probe_missing: !p,
   };
 }
@@ -872,7 +872,7 @@ function mapNodes(probeNodes) {
     const monthUsed = typeof p.month_used === 'number' ? p.month_used : monthRx + monthTx;
     const limit = p.traffic_limit || 0;
     return {
-      key: n.key, name: n.name, region: n.region || p.country || '', expires_at: normalizeExpiry(n.expires_at),
+      key: n.key, name: n.name, region: n.region || p.country || '', expires_at: normalizeExpiry(n.expires_at) || normalizeExpiry(p.expires_at),
       probe_node_id: p.id, probe_name: p.name,
       online: !!p.online, net_rx: m.net_rx || 0, net_tx: m.net_tx || 0,
       day_used: (p.day_rx || 0) + (p.day_tx || 0),
@@ -1179,7 +1179,7 @@ async function serveSubscription(req, res, token) {
     const page = '<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>订阅 · EMOS-gated</title>'
       + '<style>body{margin:0;padding:28px 20px 48px;min-height:100vh;color:#eef2f8;font-family:system-ui,-apple-system,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;font-size:15px;line-height:1.55;background:radial-gradient(900px 480px at 12% -10%,rgba(99,102,241,.28),transparent 60%),radial-gradient(760px 480px at 92% 0%,rgba(34,211,238,.15),transparent 55%),linear-gradient(180deg,#0b0f1a,#090d16)}.wrap{max-width:640px;margin:0 auto}.card{background:rgba(255,255,255,.045);border:1px solid rgba(255,255,255,.09);border-radius:16px;padding:18px 20px;margin:14px 0;box-shadow:0 12px 32px rgba(0,0,0,.38)}h1{font-size:21px;margin:0 0 6px}h2{font-size:13px;letter-spacing:.1em;text-transform:uppercase;color:#94a3b8;margin:0 0 8px}a{color:#93c5fd;text-decoration:none}a:hover{text-decoration:underline}code{word-break:break-all;background:rgba(0,0,0,.4);padding:2px 7px;border-radius:6px;font-size:13px}.muted{color:#94a3b8;font-size:13px}</style></head><body><div class="wrap">'
       + '<h1>订阅链接</h1><p class="muted">专属订阅地址，萝卜 ≤ 500 即失效。请在客户端里粘贴这条链接，不要用浏览器直接下载。</p>'
-      + '<div class="card"><h2>订阅链接（按客户端自动识别）</h2><p><a href="' + esc(urls.c_url) + '">' + esc(urls.c_url) + '</a></p><p><a href="' + esc(urls.import_url) + '">一键导入 sing-box</a></p></div>'
+      + '<div class="card"><h2>订阅链接（按客户端自动识别）</h2><p><a href="' + esc(urls.c_url) + '">' + esc(urls.c_url) + '</a></p><p><a href="' + esc(urls.import_url) + '">一键导入</a></p></div>'
       + '<p class="muted">同一条链接，FlClash / Clash Verge 返回 Clash，sing-box / Hiddify / Karing 返回 JSON，Surge 返回 Surge 配置，Shadowrocket、Loon 等返回通用链接列表。Subscription-Userinfo 为节点总流量，不是个人用量；到期时间为本月底 23:59。</p>'
       + '</div></body></html>';
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', ...commonHeaders });
@@ -1528,7 +1528,7 @@ pre{background:rgba(0,0,0,.4);border:1px solid var(--border);border-radius:10px;
 <p><span id="healthLine" class="muted"></span> <button type="button" class="ghost" id="btnLogout">退出登录</button></p>
 
 <div class="card"><div class="section-head"><h2>节点 <span class="count" id="nodeCount"></span></h2><span class="pill" id="probeNote"></span></div>
-<div class="table-scroll"><table><thead><tr><th>Key</th><th>名称</th><th>协议</th><th>服务器</th><th>探针</th><th>操作</th></tr></thead><tbody id="nodeRows"></tbody></table></div>
+<div class="table-scroll"><table><thead><tr><th>Key</th><th>名称</th><th>到期</th><th>协议</th><th>服务器</th><th>探针</th><th>操作</th></tr></thead><tbody id="nodeRows"></tbody></table></div>
 <h2 id="formTitle" style="margin-top:24px">添加节点</h2>
 <label>节点链接（hy2:// / hysteria2:// / vless://）</label>
 <textarea id="nodeLink" rows="3" placeholder="hysteria2://密码@域名:端口?sni=域名&obfs=salamander&obfs-password=xxx#名字"></textarea>
@@ -1617,9 +1617,9 @@ async function loadNodes(){
   var h='';
   nodes.forEach(function(n,i){
     var probe=n.probe_node_id==null?'—':'#'+n.probe_node_id+' '+(n.online===true?'<span class="pill ok">在线</span>':n.online===false?'<span class="pill bad">离线</span>':'<span class="pill">不在探针里</span>');
-    h+='<tr><td><code>'+esc(n.key)+'</code></td><td><b>'+esc(n.name)+'</b><br><span class="muted">'+esc(n.region)+'</span></td><td><span class="pill">'+esc(n.protocol||'—')+'</span></td><td>'+esc(n.server||'—')+':'+(n.server_port==null?'—':n.server_port)+'<br><span class="muted">sni: '+esc(n.sni||'—')+'</span></td><td>'+probe+'</td><td><button type="button" onclick="editNode('+i+')">编辑</button> <button type="button" class="ghost" onclick="moveNode('+i+',-1)">↑</button><button type="button" class="ghost" onclick="moveNode('+i+',1)">↓</button> <button type="button" class="danger" onclick="delNode(\\''+esc(n.key)+'\\')">删除</button></td></tr>';
+    h+='<tr><td><code>'+esc(n.key)+'</code></td><td><b>'+esc(n.name)+'</b><br><span class="muted">'+esc(n.region)+'</span></td><td>'+(n.expires_at?esc(n.expires_at):(n.expires_at_probe?esc(n.expires_at_probe)+' <span class="muted">探针</span>':'—'))+'</td><td><span class="pill">'+esc(n.protocol||'—')+'</span></td><td>'+esc(n.server||'—')+':'+(n.server_port==null?'—':n.server_port)+'<br><span class="muted">sni: '+esc(n.sni||'—')+'</span></td><td>'+probe+'</td><td><button type="button" onclick="editNode('+i+')">编辑</button> <button type="button" class="ghost" onclick="moveNode('+i+',-1)">↑</button><button type="button" class="ghost" onclick="moveNode('+i+',1)">↓</button> <button type="button" class="danger" onclick="delNode(\\''+esc(n.key)+'\\')">删除</button></td></tr>';
   });
-  document.getElementById('nodeRows').innerHTML=h||'<tr><td colspan="6">暂无节点</td></tr>';
+  document.getElementById('nodeRows').innerHTML=h||'<tr><td colspan="7">暂无节点</td></tr>';
   return true;
 }
 async function loadShares(){
@@ -1812,7 +1812,7 @@ code{word-break:break-all;background:rgba(0,0,0,.4);padding:2px 7px;border-radiu
 <div class="sub-row"><span class="lbl">订阅链接</span><code id="subAuto"></code><button type="button" id="btnCopyAuto">复制</button></div>
 <p class="muted">一条链接全客户端通用，服务端按客户端自动识别格式（FlClash / Clash Verge 返回 Clash，sing-box / Hiddify / Karing 返回 JSON，Surge 返回 Surge 配置，Shadowrocket、Loon 等返回通用链接列表）。</p>
 <p class="muted" id="shareInfo"></p>
-<div class="actions"><button type="button" id="btnImport">一键导入 sing-box</button> <button type="button" class="ghost" id="btnRefresh">刷新流量</button> <button type="button" class="ghost" id="btnRotate">刷新订阅链接（旧链接立即失效）</button> <button type="button" class="ghost" id="btnDisable">停用订阅链接</button> <button type="button" class="ghost" id="btnLogout">退出登录</button></div>
+<div class="actions"><button type="button" id="btnImport">一键导入</button> <button type="button" class="ghost" id="btnRefresh">刷新流量</button> <button type="button" class="ghost" id="btnRotate">刷新订阅链接（旧链接立即失效）</button> <button type="button" class="ghost" id="btnDisable">停用订阅链接</button> <button type="button" class="ghost" id="btnLogout">退出登录</button></div>
 <p class="muted" id="copyMsg"></p></div>
 </div>
 </div><script>

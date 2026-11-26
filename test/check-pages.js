@@ -104,6 +104,16 @@ function getUA(p, ua) {
     if (!nodesRes.ok || !Array.isArray(nodesRes.nodes) || !nodesRes.nodes.every((n) => 'expires_at' in n)) {
       console.error('FAIL /api/nodes does not expose expires_at'); code = 1;
     } else console.log('OK   /api/nodes exposes expires_at (' + nodesRes.nodes.length + ' nodes)');
+    // Expiry comes from the probe automatically (demo nodes have no manual
+    // expires_at; the mapped probe nodes 2/22/20 all carry one).
+    const mapped = nodesRes.nodes.filter((n) => n.probe_node_id != null);
+    if (!mapped.length || !mapped.every((n) => n.expires_at)) {
+      console.error('FAIL /api/nodes did not fill expires_at from probe'); code = 1;
+    } else console.log('OK   /api/nodes fills expires_at from probe: ' + mapped.map((n) => n.name + '=' + n.expires_at).join(', '));
+    // Button is just 一键导入 now (still the sing-box deep link underneath).
+    if (!consoleHtml.includes('>一键导入</button>') || consoleHtml.includes('一键导入 sing-box')) {
+      console.error('FAIL console import button label is not 一键导入'); code = 1;
+    } else console.log('OK   console import button reads 一键导入');
     // Admin node form has the expiry input.
     const adminHtml = await get('/admin');
     if (!adminHtml.includes('id="nodeExpiry"')) { console.error('FAIL admin node form has no expiry input'); code = 1; }
