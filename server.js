@@ -1,4 +1,4 @@
-// EMOS-gated sing-box gateway v1.5.9 — zero dependencies.
+// EMOS-gated sing-box gateway v1.5.10 — zero dependencies.
 // Node >= 18 (uses global fetch). Run: node server.js  (PORT env, default 3000)
 // Scope: EMOS login -> carrot > 500 -> console (nodes + per-user sub links)
 // + NODE TOTAL traffic only, from https://1e.lol/api/nodes. NO per-user traffic.
@@ -25,7 +25,7 @@ const path = require('path');
 const crypto = require('crypto');
 
 const PORT = parseInt(process.env.PORT || '3000', 10);
-const VERSION = '1.5.9';
+const VERSION = '1.5.10';
 const CONFIG_PATH = path.join(__dirname, 'config', 'nodes.json');
 const CLASH_TEMPLATE_PATH = path.join(__dirname, 'config', 'templates', 'clash.yaml');
 const SINGBOX_TEMPLATE_PATH = path.join(__dirname, 'config', 'templates', 'singbox.json');
@@ -2212,7 +2212,7 @@ const HTML = `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><met
 <div class="sub-row"><span class="lbl">订阅地址</span><code id="subAuto"></code><button type="button" id="btnCopyAuto">复制</button></div>
 <p class="muted">一条链接全客户端通用，服务端按客户端自动识别格式（FlClash / Clash Verge 返回 Clash，sing-box / Hiddify / Karing 返回 JSON，Surge 返回 Surge 配置，Shadowrocket、Loon 等返回通用链接列表）。</p>
 <p class="muted" id="shareInfo"></p>
-<div class="actions"><button type="button" class="ghost" id="btnRefresh">刷新流量</button> <button type="button" class="ghost" id="btnRotate">轮换链接</button> <button type="button" class="danger" id="btnDisable">停用链接</button> <button type="button" class="link-btn" id="btnLogout">退出登录</button></div>
+<div class="actions"><button type="button" class="ghost" id="btnRotate">轮换链接</button> <button type="button" class="danger" id="btnDisable">停用链接</button> <button type="button" class="link-btn" id="btnLogout">退出登录</button></div>
 <p class="muted" id="copyMsg"></p></div>
 </div>
 </div>
@@ -2259,7 +2259,6 @@ async function loadNodes(){
 document.getElementById("btnCopyAuto").onclick=function(){var url=subUrls&&(subUrls.c_url||subUrls.url);if(!url){showMsg("订阅链接还没准备好，请重新登录或稍后再试。");return}copyText(url,"已复制订阅链接，粘贴到客户端即可。");};
 document.getElementById("btnRotate").onclick=async function(){var r=await fetch("/api/sub/refresh",{method:"POST",credentials:"include",headers:session?{"X-Session":session}:{}});var j=await r.json();if(!j.ok){showMsg("刷新失败：" + (j.error||""));return}subUrls=j.sub_urls;document.getElementById("subAuto").textContent=subUrls.c_url||subUrls.url;setShareInfo(j.share);document.getElementById("copyMsg").textContent="已生成新订阅链接，旧链接立即失效，请重新导入。"};
 document.getElementById("btnDisable").onclick=async function(){if(!confirm("停用后订阅链接立即失效，重新登录才能恢复，确定？"))return;var r=await fetch("/api/sub/disable",{method:"POST",credentials:"include",headers:session?{"X-Session":session}:{}});var j=await r.json();if(j.ok){setShareInfo(j.share);document.getElementById("copyMsg").textContent="订阅链接已停用。"}};
-document.getElementById("btnRefresh").onclick=function(){loadNodes()};
 document.getElementById("btnLogout").onclick=async function(){try{await fetch("/api/logout",{method:"POST",credentials:"include",headers:session?{"X-Session":session}:{}});}catch(e){}session=null;subUrls=null;document.getElementById("dash").classList.add("hidden");document.getElementById("gatedCard").classList.add("hidden");document.getElementById("loginCard").classList.remove("hidden");showMsg("已退出登录。")};
 (function(){var q=new URLSearchParams(location.search);var e=q.get("emos_error");if(!e)return;var c=q.get("carrot");var t=parseInt(q.get("threshold"),10)||gateThreshold;var m={no_token:"EMOS 回跳里没有带 token，请重新点“用 EMOS 账号登录”再试一次。",bad_state:"登录状态不对（uuid 不匹配或已过期），请重新点“用 EMOS 账号登录”。",not_signed_in:"EMOS 未确认这次登录（sign/check 未通过：可能是 token 无效，或今天还没在 EMOS 签到），请在 EMOS 登录/签到后再试。",carrot_insufficient:"萝卜不够：当前 "+(c||"?")+"，还差 "+(c?Math.max(0,t+1-c):"?")+" 才到 "+(t+1)+"（> "+t+"）。"};showMsg(m[e]||("登录失败："+e));if(e==="carrot_insufficient"){var cv=Number(c),ok=isFinite(cv)&&c!=="";renderGate({carrot:ok?cv:"?",shortfall:ok?Math.max(0,t+1-cv):"?",threshold:t});}history.replaceState(null,"",location.pathname);})();
 async function tryResume(){
