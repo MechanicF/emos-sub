@@ -1,0 +1,6 @@
+proxies:
+{{PROXIES}}
+proxy-groups:
+{{GROUPS}}
+rules:
+{{RULES}}

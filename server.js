@@ -1,0 +1,1318 @@
+// EMOS-gated sing-box gateway — prototype, zero dependencies.
+// Node >= 18 (uses global fetch). Run: node server.js  (PORT env, default 3000)
+// Scope: EMOS login -> carrot > 500 -> console (nodes + per-user sub links)
+// + NODE TOTAL traffic only, from https://1e.lol/api/nodes. NO per-user traffic.
+// Subscription conventions follow sublinkPro (ZeroDeng01/sublinkPro):
+// consume endpoint GET /c/?token=<shareToken>&client=<idx> alongside /sub/:token,
+// client auto-detected from User-Agent or forced with client / ?format=.
+// Outputs: clash, mihomo, surge, v2ray, uri, sing-box/json. See README.md.
+// Protocols: hy2://, hysteria2:// and vless:// (incl. REALITY + VLESS Encryption).
+'use strict';
+const http = require('http');
+const fs = require('fs');
+const path = require('path');
+const crypto = require('crypto');
+
+const PORT = parseInt(process.env.PORT || '3000', 10);
+const CONFIG_PATH = path.join(__dirname, 'config', 'nodes.json');
+const CLASH_TEMPLATE_PATH = path.join(__dirname, 'config', 'templates', 'clash.yaml');
+const SINGBOX_TEMPLATE_PATH = path.join(__dirname, 'config', 'templates', 'singbox.json');
+const PROBE_URL = 'https://1e.lol/api/nodes';
+const EMOS_BASE = 'https://emos.best';
+const SESSION_TTL_MS = 24 * 60 * 60 * 1000;
+const CARROT_RECHECK_MS = 10 * 60 * 1000;
+// Runtime settings (mutable — admin can change them without a restart).
+// Precedence at startup: env var > config/settings.json > default.
+// CARROT_THRESHOLD: strict, carrot must be > this. SHARE_TTL_HOURS: 0 = never.
+// PROBE_CACHE_SECONDS: how long the 1e.lol probe response is cached.
+let CARROT_THRESHOLD = 500;
+let SHARE_TTL_HOURS = 24;
+let PROBE_CACHE_MS = 30 * 1000;
+function shareTtlMs() {
+  return Number.isFinite(SHARE_TTL_HOURS) && SHARE_TTL_HOURS > 0 ? SHARE_TTL_HOURS * 3600 * 1000 : null;
+}
+const SETTINGS_PATH = path.join(__dirname, 'config', 'settings.json');
+const SETTINGS_SOURCES = { carrot_threshold: 'default', share_ttl_hours: 'default', name_rule: 'default', probe_cache_seconds: 'default' };
+
+let NODES = [];
+let NAME_RULE = '[$Flag] $LinkCountryName - $Name';
+let NODES_NOTE = 'DEMO TEMPLATE — Replace links with real nodes.';
+try {
+  const raw = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
+  NODES = Array.isArray(raw.nodes) ? raw.nodes : [];
+  if (typeof raw._note === 'string' && raw._note) NODES_NOTE = raw._note;
+  if (typeof raw.name_rule === 'string' && raw.name_rule.trim()) NAME_RULE = raw.name_rule.trim();
+} catch (e) {
+  console.error('Failed to load config/nodes.json:', e.message);
+  NODES = [];
+}
+// Startup settings precedence: env > config/settings.json > default.
+// (Admin PUT /api/admin/settings writes settings.json and applies in-memory
+// immediately; a later restart with the env var set reverts to the env value.)
+(function applyStartupSettings() {
+  const envInt = (v) => { const n = parseInt(v, 10); return Number.isFinite(n) ? n : null; };
+  const t = envInt(process.env.CARROT_THRESHOLD);
+  if (t !== null && t >= 0) { CARROT_THRESHOLD = t; SETTINGS_SOURCES.carrot_threshold = 'env'; }
+  const ttl = parseFloat(process.env.SHARE_TTL_HOURS || '');
+  if (Number.isFinite(ttl) && ttl >= 0) { SHARE_TTL_HOURS = ttl; SETTINGS_SOURCES.share_ttl_hours = 'env'; }
+  const pcs = envInt(process.env.PROBE_CACHE_SECONDS);
+  if (pcs !== null && pcs > 0) { PROBE_CACHE_MS = pcs * 1000; SETTINGS_SOURCES.probe_cache_seconds = 'env'; }
+  let file = null;
+  try { file = JSON.parse(fs.readFileSync(SETTINGS_PATH, 'utf8')); } catch (e) { /* no settings file yet */ }
+  if (file && typeof file === 'object') {
+    if (SETTINGS_SOURCES.carrot_threshold !== 'env' && typeof file.carrot_threshold === 'number' && file.carrot_threshold >= 0) { CARROT_THRESHOLD = Math.floor(file.carrot_threshold); SETTINGS_SOURCES.carrot_threshold = 'settings'; }
+    if (SETTINGS_SOURCES.share_ttl_hours !== 'env' && typeof file.share_ttl_hours === 'number' && file.share_ttl_hours >= 0) { SHARE_TTL_HOURS = file.share_ttl_hours; SETTINGS_SOURCES.share_ttl_hours = 'settings'; }
+    if (SETTINGS_SOURCES.probe_cache_seconds !== 'env' && typeof file.probe_cache_seconds === 'number' && file.probe_cache_seconds > 0) { PROBE_CACHE_MS = Math.floor(file.probe_cache_seconds) * 1000; SETTINGS_SOURCES.probe_cache_seconds = 'settings'; }
+    if (typeof file.name_rule === 'string' && file.name_rule.trim()) { NAME_RULE = file.name_rule.trim(); SETTINGS_SOURCES.name_rule = 'settings'; }
+  }
+})();
+
+// --- subscription templates (sublinkPro-style, plain placeholders) -------
+// config/templates/clash.yaml: {{PROXIES}} {{GROUPS}} {{RULES}}
+// config/templates/singbox.json: {{OUTBOUNDS}} {{PROXY_TAGS_JSON}} {{DEFAULT_TAG}}
+// Missing template files fall back to the built-in strings below.
+const BUILTIN_CLASH_TEMPLATE = 'proxies:\n{{PROXIES}}\nproxy-groups:\n{{GROUPS}}\nrules:\n{{RULES}}\n';
+const BUILTIN_SINGBOX_TEMPLATE = '{\n  "log": { "level": "info", "timestamp": true },\n'
+  + '  "dns": {\n    "servers": [\n      { "tag": "dns-remote", "address": "tls://8.8.8.8", "detour": "PROXY" },\n'
+  + '      { "tag": "dns-direct", "address": "223.5.5.5", "detour": "direct" }\n    ],\n'
+  + '    "rules": [{ "outbound": "any", "server": "dns-direct" }],\n    "final": "dns-remote", "strategy": "ipv4_only"\n  },\n'
+  + '  "inbounds": [{ "type": "mixed", "tag": "mixed-in", "listen": "127.0.0.1", "listen_port": 7890 }],\n'
+  + '  "outbounds": {{OUTBOUNDS}},\n'
+  + '  "route": {\n    "rules": [\n      { "protocol": "dns", "outbound": "dns-out" },\n      { "ip_is_private": true, "outbound": "direct" }\n    ],\n'
+  + '    "final": "PROXY", "auto_detect_interface": true\n  }\n}\n';
+function loadTemplate(p, fallback) {
+  try { return fs.readFileSync(p, 'utf8'); } catch (e) { return fallback; }
+}
+let CLASH_TEMPLATE = loadTemplate(CLASH_TEMPLATE_PATH, BUILTIN_CLASH_TEMPLATE);
+let SINGBOX_TEMPLATE = loadTemplate(SINGBOX_TEMPLATE_PATH, BUILTIN_SINGBOX_TEMPLATE);
+
+// Sample fallback — values copied from live 1e.lol/api/nodes on 2026-11-26.
+// ONLY used when the live probe fetch fails; responses are labelled sample:true.
+// Never present these as live data.
+const SAMPLE_PROBE = [
+  { id: 2, name: 'Nuyek', country: 'US', online: true, day_rx: 1170645409, day_tx: 303375558, month_rx: 14030933662, month_tx: 4589289084, month_used: 18620222746, traffic_limit: 8796093022208, traffic_mode: 'sum', traffic_reset_day: 1, month_start: '2026-11-01', metrics: { cpu: 0, net_rx: 26259, net_tx: 2520, uptime: 125458 } },
+  { id: 22, name: 'Raksmart', country: 'US', online: true, day_rx: 106716302, day_tx: 114857291, month_rx: 8803404166, month_tx: 7768455587, month_used: 16571859753, traffic_limit: 1099511627776, traffic_mode: 'sum', traffic_reset_day: 1, month_start: '2026-11-01', metrics: { cpu: 1.0, net_rx: 2410, net_tx: 2671, uptime: 86356 } },
+  { id: 20, name: '伤心的云', country: 'HK', online: true, day_rx: 34698138, day_tx: 43898440, month_rx: 40575411285, month_tx: 42388808469, month_used: 82964219754, traffic_limit: 1099511627776, traffic_mode: 'sum', traffic_reset_day: 1, month_start: '2026-11-01', metrics: { cpu: 1.0, net_rx: 264, net_tx: 774, uptime: 125073 } },
+];
+
+const sessions = new Map(); // sessionId -> {user_id, username, carrot, emosToken, demo, expiresAt, lastCarrotCheck, shareToken}
+// Share record (sublinkPro-style, one per login; refresh rotates, disable blocks):
+// {token, user_id, sessionId, created_at, expires_at (null = never), enabled,
+//  access_count, last_ip, last_user_agent, last_access_at}
+const shares = new Map(); // shareToken -> share
+function createShare(sessionId, userId) {
+  const token = randHex(16);
+  const now = Date.now();
+  const ttl = shareTtlMs();
+  const share = {
+    id: randHex(8), token, user_id: userId, sessionId,
+    created_at: now,
+    expires_at: ttl ? now + ttl : null,
+    enabled: true, access_count: 0, last_ip: null, last_user_agent: null, last_access_at: null,
+  };
+  shares.set(token, share);
+  return share;
+}
+function getShare(token) {
+  const s = shares.get(token);
+  if (!s || !s.enabled) return null;
+  if (s.expires_at && Date.now() > s.expires_at) return null;
+  return s;
+}
+function shareInfo(s) {
+  if (!s) return null;
+  return { id: s.id || null, token: s.token, user_id: s.user_id, created_at: s.created_at, expires_at: s.expires_at, enabled: s.enabled, access_count: s.access_count, last_ip: s.last_ip, last_user_agent: s.last_user_agent, last_access_at: s.last_access_at };
+}
+function clientIp(req) {
+  const fwd = req.headers['x-forwarded-for'];
+  if (typeof fwd === 'string' && fwd) return fwd.split(',')[0].trim();
+  return (req.socket && req.socket.remoteAddress) || null;
+}
+
+function randHex(n) { return crypto.randomBytes(n).toString('hex'); }
+function sendJson(res, code, obj) {
+  const body = JSON.stringify(obj);
+  res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+  res.end(body);
+}
+function readBody(req) {
+  return new Promise((resolve, reject) => {
+    let data = '';
+    req.on('data', (c) => { data += c; if (data.length > 65536) req.destroy(); });
+    req.on('end', () => {
+      if (!data) return resolve({});
+      try { resolve(JSON.parse(data)); } catch (e) { reject(new Error('invalid JSON')); }
+    });
+    req.on('error', reject);
+  });
+}
+function baseUrl(req) {
+  const proto = req.headers['x-forwarded-proto'] || 'http';
+  return proto + '://' + req.headers.host;
+}
+function getSession(req) {
+  const sid = req.headers['x-session'];
+  if (!sid || typeof sid !== 'string') return null;
+  const s = sessions.get(sid);
+  if (!s) return null;
+  if (Date.now() > s.expiresAt) { sessions.delete(sid); if (s.shareToken) shares.delete(s.shareToken); return null; }
+  return { sid, ...s };
+}
+
+// --- admin backend ---------------------------------------------------------
+// Single-owner admin (Simon only). No user accounts, no default token.
+// ADMIN_TOKEN env is required: without it every /api/admin/* call is 503.
+// Login issues a random HttpOnly cookie session (24h, in-memory); API calls
+// also accept X-Admin-Token: <ADMIN_TOKEN or admin session id>.
+// Admin credentials are never logged and never appear in URLs.
+const ADMIN_TOKEN = process.env.ADMIN_TOKEN || '';
+const ADMIN_SESSION_TTL_MS = 24 * 60 * 60 * 1000;
+const adminSessions = new Map(); // adminSessionId -> {createdAt, expiresAt}
+function parseCookies(req) {
+  const out = {};
+  const h = req.headers.cookie;
+  if (!h) return out;
+  h.split(';').forEach((part) => {
+    const i = part.indexOf('=');
+    if (i > 0) out[part.slice(0, i).trim()] = decodeURIComponent(part.slice(i + 1).trim());
+  });
+  return out;
+}
+function getAdminSession(req) {
+  if (!ADMIN_TOKEN) return null;
+  const header = req.headers['x-admin-token'];
+  if (typeof header === 'string' && header) {
+    if (header === ADMIN_TOKEN) return { via: 'header-token' };
+    const s = adminSessions.get(header);
+    if (s && Date.now() < s.expiresAt) return { via: 'header-session', id: header };
+    if (s) adminSessions.delete(header);
+  }
+  const cookie = parseCookies(req).admin_session;
+  if (cookie) {
+    const s = adminSessions.get(cookie);
+    if (s && Date.now() < s.expiresAt) return { via: 'cookie', id: cookie };
+    if (s) adminSessions.delete(cookie);
+  }
+  return null;
+}
+// Returns true when authorised; otherwise sends 503 (no ADMIN_TOKEN) or 401.
+function requireAdmin(req, res) {
+  if (!ADMIN_TOKEN) { sendJson(res, 503, { ok: false, error: 'admin not configured: set ADMIN_TOKEN env and restart the server' }); return false; }
+  if (!getAdminSession(req)) { sendJson(res, 401, { ok: false, error: 'admin login required — POST /api/admin/login or send X-Admin-Token' }); return false; }
+  return true;
+}
+function maskToken(t) {
+  if (!t) return '';
+  return t.slice(0, 6) + '…';
+}
+function adminShareInfo(s) {
+  return { id: s.id || null, token_masked: maskToken(s.token), user_id: s.user_id, created_at: s.created_at, expires_at: s.expires_at, enabled: s.enabled, access_count: s.access_count, last_ip: s.last_ip, last_user_agent: s.last_user_agent, last_access_at: s.last_access_at };
+}
+function findShareByRef(ref) {
+  if (!ref) return null;
+  if (shares.has(ref)) return shares.get(ref);
+  for (const s of shares.values()) if (s.id === ref) return s;
+  return null;
+}
+// Atomic write: temp file in the same dir + rename. nodes.json also keeps a
+// one-generation backup (nodes.json.bak) of the previous version.
+function atomicWrite(filePath, content) {
+  const tmp = filePath + '.tmp-' + process.pid;
+  fs.writeFileSync(tmp, content, 'utf8');
+  fs.renameSync(tmp, filePath);
+}
+function saveNodesConfig() {
+  const prev = path.join(__dirname, 'config', 'nodes.json.bak');
+  try { fs.copyFileSync(CONFIG_PATH, prev); } catch (e) { /* first save: no previous file */ }
+  const doc = { _note: NODES_NOTE, name_rule: NAME_RULE, nodes: NODES };
+  atomicWrite(CONFIG_PATH, JSON.stringify(doc));
+}
+function saveSettingsFile() {
+  const doc = {
+    carrot_threshold: CARROT_THRESHOLD,
+    share_ttl_hours: SHARE_TTL_HOURS,
+    name_rule: NAME_RULE,
+    probe_cache_seconds: Math.floor(PROBE_CACHE_MS / 1000),
+  };
+  atomicWrite(SETTINGS_PATH, JSON.stringify(doc, null, 2) + '\n');
+  return doc;
+}
+function slugify(s) {
+  return String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 48) || 'node';
+}
+function uniqueKey(base) {
+  let key = base, i = 2;
+  while (NODES.some((n) => n.key === key)) { key = base + '-' + i; i += 1; }
+  return key;
+}
+function validateProbeId(v) {
+  if (v === null || v === undefined || v === '') return null;
+  const n = typeof v === 'number' ? v : parseInt(String(v), 10);
+  if (!Number.isInteger(n) || n <= 0) return undefined; // invalid marker
+  return n;
+}
+function parseAnyLink(link, fallbackName) {
+  if (typeof link !== 'string') return { protocol: '', parsed: null };
+  const l = link.trim();
+  if (l.startsWith('vless://')) return { protocol: 'vless', parsed: parseVless(l, fallbackName) };
+  if (l.startsWith('hy2://') || l.startsWith('hysteria2://')) return { protocol: 'hy2', parsed: parseHy2(l, fallbackName) };
+  return { protocol: '', parsed: null };
+}
+function nodeAdminView(n, probeMap) {
+  const parsed = parseNodeLink(n, n.name);
+  const p = probeMap ? probeMap.get(n.probe_node_id) : null;
+  return {
+    key: n.key, name: n.name, region: n.region || '', protocol: nodeProtocol(n),
+    link: nodeLink(n),
+    server: parsed ? parsed.server : null, server_port: parsed ? parsed.server_port : null,
+    sni: parsed ? (parsed.sni || (parsed.tls && parsed.tls.server_name) || null) : null,
+    link_name: parsed ? parsed.tag : null,
+    probe_node_id: n.probe_node_id ?? null, probe_name: p ? p.name : (n.probe_name || null),
+    online: p ? !!p.online : null, probe_missing: !p,
+  };
+}
+
+// --- hy2:// link parsing -------------------------------------------------
+// hysteria2:// and hy2:// are both accepted (sublinkPro convention).
+// Userinfo is percent-decoded ONCE: both of these preserve the full credential
+//   hy2://user:pass@host:port   -> password "user:pass"
+//   hy2://user%3Apass@host:port -> password "user:pass" (URL keeps %3A in
+//   username; decodeURIComponent once turns it into the colon)
+// Single-password links (hy2://onlypass@host) keep password "onlypass".
+// Preserved params: sni, insecure, obfs, obfs-password, pinSHA256,
+// ports (port-hopping range, e.g. 20000-50000), hop-interval.
+function parseHy2(link, fallbackName) {
+  try {
+    const u = new URL(link);
+    if (u.protocol !== 'hysteria2:' && u.protocol !== 'hy2:') return null;
+    // Decode userinfo once. Note: URL already splits user:pass on a literal
+    // colon, but leaves %3A encoded inside username — decode once recovers it.
+    const rawUserinfo = u.username + (u.password ? ':' + u.password : '');
+    const password = decodeURIComponent(rawUserinfo);
+    if (!password || !u.hostname) return null;
+    const port = parseInt(u.port || '443', 10);
+    const params = u.searchParams;
+    const sni = params.get('sni') || u.hostname;
+    const insecure = params.get('insecure') === '1' || params.get('insecure') === 'true';
+    const obfs = params.get('obfs');
+    const obfsPassword = params.get('obfs-password');
+    const pinSHA256 = params.get('pinSHA256') || params.get('pin-sha256') || null;
+    const ports = params.get('ports') || params.get('port-hopping') || null;
+    const hopInterval = params.get('hop-interval') || params.get('hopInterval') || null;
+    const name = decodeURIComponent(u.hash ? u.hash.slice(1) : '') || fallbackName;
+    const out = {
+      type: 'hysteria2', tag: name, server: u.hostname, server_port: port,
+      version: 2, password, network: 'udp',
+      tls: { enabled: true, server_name: sni, insecure },
+    };
+    if (pinSHA256) out.tls.pinSHA256 = pinSHA256;
+    if (obfs === 'salamander' && obfsPassword) out.obfs = { type: 'salamander', password: obfsPassword };
+    else if (obfs && obfs !== 'none') out.obfs = { type: obfs, password: obfsPassword || '' };
+    if (ports) out.ports = ports;
+    if (hopInterval) out.hopInterval = hopInterval;
+    return out;
+  } catch (e) { return null; }
+}
+
+// --- vless:// link parsing -------------------------------------------------
+// vless://<uuid>@<host>:<port>?<query>#<name>
+// Preserved exactly (sublinkPro REALITY convention):
+//   encryption, flow, security, sni, fp, pbk, sid, type, path, host,
+//   serviceName, mode, alpn, spx, pqv.
+//   support-x25519mlkem768: "true"/"1" -> true, "false"/"0" -> false,
+//   absent -> undefined (true/false stay distinct from omission — never
+//   default it). spx/pqv map to reality-opts spider-x / mldsa65-verify in
+//   Clash and are preserved verbatim in the URI output; when absent they
+//   are simply absent, never invented.
+//   security=reality -> tls.reality in sing-box, reality-opts in Clash,
+//   reality-public-key / reality-short-id in Surge.
+//   encryption is kept verbatim (e.g. mlkem768x25519plus.native.0rtt....).
+function parseVless(link, fallbackName) {
+  try {
+    const u = new URL(link);
+    if (u.protocol !== 'vless:') return null;
+    const uuid = decodeURIComponent(u.username);
+    if (!uuid || !u.hostname) return null;
+    const port = parseInt(u.port || '443', 10);
+    const p = u.searchParams;
+    const rawSupport = p.get('support-x25519mlkem768');
+    let support;
+    if (rawSupport === 'true' || rawSupport === '1') support = true;
+    else if (rawSupport === 'false' || rawSupport === '0') support = false;
+    // any other value: leave undefined (do not guess)
+    const security = (p.get('security') || 'none').toLowerCase();
+    const name = decodeURIComponent(u.hash ? u.hash.slice(1) : '') || fallbackName;
+    return {
+      type: 'vless', tag: name, server: u.hostname, server_port: port,
+      uuid, flow: p.get('flow') || undefined,
+      encryption: p.get('encryption') || undefined,
+      network: (p.get('type') || 'tcp').toLowerCase(), security,
+      sni: p.get('sni') || undefined, fp: p.get('fp') || undefined,
+      pbk: p.get('pbk') || undefined, sid: p.get('sid') || undefined,
+      supportX25519MLKEM768: support,
+      spx: p.get('spx') || undefined, pqv: p.get('pqv') || undefined,
+      path: p.get('path') || undefined, host: p.get('host') || undefined,
+      serviceName: p.get('serviceName') || undefined,
+      mode: p.get('mode') || undefined, alpn: p.get('alpn') || undefined,
+      rawLink: link,
+    };
+  } catch (e) { return null; }
+}
+
+// Generic node link: "link" accepts any supported scheme (hy2://,
+// hysteria2://, vless://); "hy2_link" is the legacy field and still works.
+function nodeLink(n) { return n.link || n.hy2_link || null; }
+function nodeProtocol(n) {
+  const l = nodeLink(n);
+  if (!l) return '';
+  if (l.startsWith('vless://')) return 'vless';
+  if (l.startsWith('hy2://') || l.startsWith('hysteria2://')) return 'hy2';
+  return '';
+}
+function parseNodeLink(n, fallbackName) {
+  const link = nodeLink(n);
+  if (!link) return null;
+  if (link.startsWith('vless://')) return parseVless(link, fallbackName);
+  return parseHy2(link, fallbackName);
+}
+// Rule variables: $Flag, $LinkCountryName, $Name, $Protocol, $Index,
+// $DuplicateIndex (0 for first of a name, 1 for the second, ...).
+// Default rule (config/nodes.json "name_rule"): "[$Flag] $LinkCountryName - $Name"
+const COUNTRY_NAMES = {
+  HK: '香港', US: '美国', JP: '日本', SG: '新加坡', KR: '韩国', GB: '英国',
+  DE: '德国', FR: '法国', CA: '加拿大', AU: '澳大利亚', NL: '荷兰', TW: '台湾',
+  CN: '中国', IN: '印度', ID: '印度尼西亚', TH: '泰国', VN: '越南', MY: '马来西亚',
+  PH: '菲律宾', RU: '俄罗斯', BR: '巴西', TR: '土耳其', AE: '阿联酋',
+};
+function flagEmoji(cc) {
+  if (!cc || cc.length !== 2) return '';
+  const c = cc.toUpperCase();
+  if (!/^[A-Z]{2}$/.test(c)) return '';
+  return String.fromCodePoint(127397 + c.charCodeAt(0), 127397 + c.charCodeAt(1));
+}
+function shortName(n) {
+  // Config names are "US · Nuyek" style; $Name is the part after "· ".
+  const name = String(n.name || n.key || '');
+  const i = name.indexOf('·');
+  return (i >= 0 ? name.slice(i + 1) : name).trim() || name;
+}
+function flagAtStart(s) {
+  // True if s starts with a regional-indicator flag emoji (two code points
+  // U+1F1E6..U+1F1FF). Such a name is already decorated — keep it as-is
+  // instead of adding another flag via the naming rule.
+  const cps = Array.from(String(s || ''));
+  return cps.length >= 2
+    && cps[0].codePointAt(0) >= 0x1F1E6 && cps[0].codePointAt(0) <= 0x1F1FF
+    && cps[1].codePointAt(0) >= 0x1F1E6 && cps[1].codePointAt(0) <= 0x1F1FF;
+}
+function displayNames() {
+  // Render each node's display name once, assigning $DuplicateIndex by
+  // counting identical base names (rule with $DuplicateIndex removed).
+  const seen = new Map();
+  return NODES.map((n, idx) => {
+    const cc = String(n.region || n.country || '').toUpperCase();
+    const proto = nodeProtocol(n) || 'hy2';
+    const name = shortName(n);
+    // Name already starts with a flag (e.g. "🇭🇰 reality-1-v4" from a
+    // vless link fragment): keep it as-is, do not double-add a flag.
+    if (flagAtStart(name)) {
+      const dup = seen.get(name) || 0;
+      seen.set(name, dup + 1);
+      return (name + (dup ? ' ' + dup : '')).replace(/\s+/g, ' ').trim();
+    }
+    const base = NAME_RULE
+      .replace(/\$DuplicateIndex/g, '')
+      .replace(/\$Flag/g, flagEmoji(cc))
+      .replace(/\$LinkCountryName/g, COUNTRY_NAMES[cc] || cc)
+      .replace(/\$Name/g, name)
+      .replace(/\$Protocol/g, proto)
+      .replace(/\$Index/g, String(idx));
+    const dup = seen.get(base) || 0;
+    seen.set(base, dup + 1);
+    const tag = NAME_RULE
+      .replace(/\$DuplicateIndex/g, String(dup))
+      .replace(/\$Flag/g, flagEmoji(cc))
+      .replace(/\$LinkCountryName/g, COUNTRY_NAMES[cc] || cc)
+      .replace(/\$Name/g, name)
+      .replace(/\$Protocol/g, proto)
+      .replace(/\$Index/g, String(idx))
+      .replace(/\s+/g, ' ').trim();
+    return tag;
+  });
+}
+function parsedNodes() {
+  // Parsed outbounds (hy2 + vless) with sublinkPro display names as tags.
+  const names = displayNames();
+  const out = [];
+  NODES.forEach((n, i) => {
+    const o = parseNodeLink(n, n.name);
+    if (!o) return;
+    o.tag = names[i];
+    o._node = n;
+    out.push(o);
+  });
+  return out;
+}
+function renamedLink(n, displayTag) {
+  // URI output: original link (hy2 or vless) with the fragment replaced by
+  // the display name (sublinkPro returns one stored node URI per line for
+  // client=uri). For a name that already is the link fragment (flag-kept
+  // vless names) this round-trips to the original link verbatim.
+  try {
+    const u = new URL(nodeLink(n));
+    u.hash = '#' + encodeURIComponent(displayTag);
+    return u.toString();
+  } catch (e) { return nodeLink(n); }
+}
+
+// --- sing-box outbound conversion ----------------------------------------
+// hy2 parsed objects are already sing-box-shaped; vless needs conversion.
+function vlessToSingBox(o) {
+  const out = {
+    type: 'vless', tag: o.tag, server: o.server, server_port: o.server_port,
+    uuid: o.uuid,
+  };
+  if (o.flow) out.flow = o.flow;
+  // VLESS Encryption: included verbatim. Upstream stock sing-box does NOT
+  // (yet) accept an "encryption" field on vless outbounds — it is supported
+  // by Xray and by sing-box forks (sing-box-lx / TodayCore, which document
+  // exactly this field). Never silently dropped; see README.
+  if (o.encryption) out.encryption = o.encryption;
+  if (o.security && o.security !== 'none') {
+    const tls = { enabled: true };
+    if (o.sni) tls.server_name = o.sni;
+    if (o.alpn) tls.alpn = o.alpn.split(',').map((s) => s.trim()).filter(Boolean);
+    if (o.fp) tls.utls = { enabled: true, fingerprint: o.fp };
+    if (o.security === 'reality' && o.pbk) {
+      tls.reality = { enabled: true, public_key: o.pbk };
+      if (o.sid) tls.reality.short_id = o.sid;
+      // support-x25519mlkem768 has no sing-box field: the hybrid PQ key
+      // exchange is applied automatically for supported uTLS fingerprints.
+      // spx/pqv likewise have no sing-box outbound fields; they survive in
+      // the URI output and in Clash reality-opts.
+    }
+    out.tls = tls;
+  }
+  if (o.network === 'ws') {
+    out.transport = { type: 'ws', path: o.path || '/', headers: { Host: o.host || o.sni || o.server } };
+  } else if (o.network === 'grpc') {
+    out.transport = { type: 'grpc', service_name: o.serviceName || '' };
+  } else if (o.network === 'xhttp') {
+    out.transport = { type: 'xhttp', path: o.path || '/', host: o.host || o.sni || undefined };
+  }
+  return out;
+}
+function toSingBoxOutbound(o) {
+  if (o.type === 'vless') return vlessToSingBox(o);
+  const { _node, ...rest } = o;
+  // sing-box hysteria2 has no ports-range field: keep the first (listen)
+  // port; the range is preserved in the URI / Clash outputs.
+  return rest;
+}
+
+function buildSingBoxConfig() {
+  const outbounds = parsedNodes();
+  const tags = outbounds.map((o) => o.tag);
+  const first = tags[0] || 'direct';
+  const full = [
+    ...outbounds.map((o) => toSingBoxOutbound(o)),
+    { type: 'selector', tag: 'PROXY', outbounds: tags, default: first },
+    { type: 'urltest', tag: 'AUTO', outbounds: tags, url: 'https://www.gstatic.com/generate_204', interval: '5m' },
+    { type: 'direct', tag: 'direct' },
+    { type: 'block', tag: 'block' },
+    { type: 'dns', tag: 'dns-out' },
+  ];
+  const rendered = SINGBOX_TEMPLATE
+    .replace('{{OUTBOUNDS}}', JSON.stringify(full, null, 2))
+    .replace('{{PROXY_TAGS_JSON}}', JSON.stringify(tags))
+    .replace('{{DEFAULT_TAG}}', JSON.stringify(first));
+  return JSON.parse(rendered);
+}
+
+function yamlStr(s) { return JSON.stringify(String(s == null ? '' : s)); }
+
+function buildClashYaml() {
+  const outs = parsedNodes();
+  const proxyLines = [];
+  for (const o of outs) {
+    if (o.type === 'vless') {
+      proxyLines.push('  - name: ' + yamlStr(o.tag));
+      proxyLines.push('    type: vless');
+      proxyLines.push('    server: ' + yamlStr(o.server));
+      proxyLines.push('    port: ' + o.server_port);
+      proxyLines.push('    uuid: ' + yamlStr(o.uuid));
+      proxyLines.push('    network: ' + yamlStr(o.network || 'tcp'));
+      proxyLines.push('    tls: ' + (o.security === 'tls' || o.security === 'reality' ? 'true' : 'false'));
+      if (o.flow) proxyLines.push('    flow: ' + yamlStr(o.flow));
+      if (o.sni) proxyLines.push('    servername: ' + yamlStr(o.sni));
+      if (o.fp) proxyLines.push('    client-fingerprint: ' + yamlStr(o.fp));
+      if (o.alpn) proxyLines.push('    alpn: ' + yamlStr(o.alpn));
+      if (o.security === 'reality' && o.pbk) {
+        proxyLines.push('    reality-opts:');
+        proxyLines.push('      public-key: ' + yamlStr(o.pbk));
+        if (o.sid) proxyLines.push('      short-id: ' + yamlStr(o.sid));
+        // support-x25519mlkem768: true/false only when explicitly present;
+        // absent stays absent (sublinkPro convention).
+        if (typeof o.supportX25519MLKEM768 === 'boolean') proxyLines.push('      support-x25519mlkem768: ' + (o.supportX25519MLKEM768 ? 'true' : 'false'));
+        if (o.spx) proxyLines.push('      spider-x: ' + yamlStr(o.spx));
+        if (o.pqv) proxyLines.push('      mldsa65-verify: ' + yamlStr(o.pqv));
+      }
+      if (o.network === 'ws') {
+        proxyLines.push('    ws-opts:');
+        proxyLines.push('      path: ' + yamlStr(o.path || '/'));
+        proxyLines.push('      headers:');
+        proxyLines.push('        Host: ' + yamlStr(o.host || o.sni || o.server));
+      }
+      if (o.network === 'grpc') {
+        proxyLines.push('    grpc-opts:');
+        proxyLines.push('      grpc-service-name: ' + yamlStr(o.serviceName || ''));
+      }
+      continue;
+    }
+    proxyLines.push('  - name: ' + yamlStr(o.tag));
+    proxyLines.push('    type: hysteria2');
+    proxyLines.push('    server: ' + yamlStr(o.server));
+    proxyLines.push('    port: ' + o.server_port);
+    proxyLines.push('    password: ' + yamlStr(o.password));
+    proxyLines.push('    sni: ' + yamlStr(o.tls.server_name));
+    if (o.tls.insecure) proxyLines.push('    skip-cert-verify: true');
+    if (o.tls.pinSHA256) proxyLines.push('    fingerprint: ' + yamlStr(o.tls.pinSHA256));
+    if (o.ports) proxyLines.push('    ports: ' + yamlStr(o.ports));
+    if (o.obfs) {
+      proxyLines.push('    obfs: ' + yamlStr(o.obfs.type));
+      if (o.obfs.password) proxyLines.push('    obfs-password: ' + yamlStr(o.obfs.password));
+    }
+  }
+  const names = outs.map((o) => o.tag);
+  const list = '[' + names.map(yamlStr).join(', ') + ']';
+  const groupLines = [
+    '  - name: PROXY',
+    '    type: select',
+    '    proxies: ' + list,
+    '  - name: AUTO',
+    '    type: url-test',
+    '    proxies: ' + list,
+    '    url: https://www.gstatic.com/generate_204',
+    '    interval: 300',
+  ];
+  const ruleLines = [
+    '  - IP-CIDR,192.168.0.0/16,DIRECT,no-resolve',
+    '  - IP-CIDR,10.0.0.0/8,DIRECT,no-resolve',
+    '  - IP-CIDR,172.16.0.0/12,DIRECT,no-resolve',
+    '  - MATCH,PROXY',
+  ];
+  return CLASH_TEMPLATE
+    .replace('{{PROXIES}}', proxyLines.join('\n'))
+    .replace('{{GROUPS}}', groupLines.join('\n'))
+    .replace('{{RULES}}', ruleLines.join('\n'));
+}
+
+function buildLinksText() {
+  const names = displayNames();
+  return NODES.map((n, i) => renamedLink(n, names[i])).filter(Boolean).join('\n') + '\n';
+}
+
+function surgeLine(o) {
+  if (o.type === 'vless') return surgeVlessLine(o);
+  // Surge hysteria2: Name = hysteria2, server, port, password=..., sni=...,
+  //   obfs=salamander, obfs-password=..., skip-cert-verify=true
+  const parts = ['hysteria2', o.server, String(o.server_port), 'password=' + o.password, 'sni=' + o.tls.server_name];
+  if (o.tls.insecure) parts.push('skip-cert-verify=true');
+  if (o.obfs) {
+    parts.push('obfs=' + o.obfs.type);
+    if (o.obfs.password) parts.push('obfs-password=' + o.obfs.password);
+  }
+  return o.tag + ' = ' + parts.join(', ');
+}
+function surgeVlessLine(o) {
+  // Surge VLESS (iOS 6.0.0+ / Mac 6.12.0+, Surge manual):
+  //   Name = vless, host, port, username=<uuid>, flow=xtls-rprx-vision,
+  //   sni=..., reality-public-key=..., reality-short-id=...,
+  //   encryption=mlkem768x25519plus.... (setting reality-public-key enables
+  //   REALITY, which implies TLS — no separate tls=true needed for it).
+  const parts = ['vless', o.server, String(o.server_port), 'username=' + o.uuid];
+  if (o.flow) parts.push('flow=' + o.flow);
+  if (o.security === 'tls') parts.push('tls=true');
+  if (o.sni) parts.push('sni=' + o.sni);
+  if (o.fp) parts.push('client-fingerprint=' + o.fp);
+  if (o.security === 'reality' && o.pbk) {
+    parts.push('reality-public-key=' + o.pbk);
+    if (o.sid) parts.push('reality-short-id=' + o.sid);
+  }
+  if (o.encryption && o.encryption !== 'none') parts.push('encryption=' + o.encryption);
+  if (o.network === 'ws') {
+    parts.push('ws=true');
+    if (o.path) parts.push('ws-path=' + o.path);
+    if (o.host) parts.push('ws-headers=Host:' + o.host);
+  }
+  if (o.network === 'grpc') {
+    parts.push('grpc=true');
+    if (o.serviceName) parts.push('grpc-service-name=' + o.serviceName);
+  }
+  return o.tag + ' = ' + parts.join(', ');
+}
+function buildSurgeConfig(req, token) {
+  const outs = parsedNodes();
+  const names = outs.map((o) => o.tag);
+  const lines = [];
+  lines.push('#!MANAGED-CONFIG ' + baseUrl(req) + '/c/?token=' + token + ' interval=86400 strict=true');
+  lines.push('');
+  lines.push('[Proxy]');
+  for (const o of outs) lines.push(surgeLine(o));
+  lines.push('');
+  lines.push('[Proxy Group]');
+  lines.push('PROXY = select, ' + names.join(', '));
+  lines.push('AUTO = url-test, ' + names.join(', ') + ', url=https://www.gstatic.com/generate_204, interval=300');
+  lines.push('');
+  lines.push('[Rule]');
+  lines.push('IP-CIDR,192.168.0.0/16,DIRECT');
+  lines.push('IP-CIDR,10.0.0.0/8,DIRECT');
+  lines.push('IP-CIDR,172.16.0.0/12,DIRECT');
+  lines.push('FINAL,PROXY');
+  return lines.join('\n') + '\n';
+}
+
+// Client resolution (sublinkPro: GET /c/?token=..&client=<idx>).
+// client values: clash, mihomo (=clash YAML), sing-box, singbox, json
+// (=sing-box JSON), v2ray (=base64 links), uri (=plain hy2 links),
+// surge (=Surge config), links (=uri), b64 (=v2ray).
+// ?format= is an alias for client on /sub/:token. ?format= wins over UA;
+// client= wins over ?format=. Browsers (no client UA) get 'html'.
+// UA notes: surge -> surge; loon/egern/stash/surfboard/shadowrocket/quanx
+// -> uri (in sublinkPro these expanded formats need the Sub-Store sidecar;
+// this prototype returns the plain hy2 URI list for them, not a full
+// conversion — see README).
+function resolveClient(req) {
+  const u = new URL(req.url, 'http://localhost');
+  const raw = (u.searchParams.get('client') || u.searchParams.get('format') || '').trim().toLowerCase();
+  if (raw) {
+    if (raw === 'clash' || raw === 'mihomo' || raw === 'yaml' || raw === 'yml') return 'clash';
+    if (raw === 'sing-box' || raw === 'singbox' || raw === 'json') return 'singbox';
+    if (raw === 'surge') return 'surge';
+    if (raw === 'v2ray' || raw === 'b64' || raw === 'base64') return 'b64';
+    if (raw === 'uri' || raw === 'links' || raw === 'link' || raw === 'txt' || raw === 'plain') return 'links';
+    if (raw === 'html' || raw === 'page') return 'html';
+  }
+  const ua = String(req.headers['user-agent'] || '').toLowerCase();
+  if (!ua) return 'html';
+  if (ua.includes('surge')) return 'surge';
+  if (ua.includes('sing-box') || ua.includes('singbox') || ua.includes('hiddify') || ua.includes('karing')) return 'singbox';
+  if (ua.includes('clash') || ua.includes('mihomo') || ua.includes('clashmeta') || ua.includes('clash-meta') || ua.includes('verge')) return 'clash';
+  // Expanded clients: sublinkPro serves these via Sub-Store; here: URI list.
+  if (ua.includes('shadowrocket') || ua.includes('nekobox') || ua.includes('v2ray') || ua.includes('streisand') || ua.includes('loon') || ua.includes('egern') || ua.includes('stash') || ua.includes('surfboard') || ua.includes('quanx') || ua.includes('quantumult')) return 'links';
+  // Browser UA (Mozilla + Chrome/Firefox/Safari/Edg, no client keyword above) -> chooser page.
+  if (ua.includes('mozilla') && (ua.includes('chrome') || ua.includes('firefox') || ua.includes('safari') || ua.includes('edg'))) return 'html';
+  return 'links'; // other / generic clients: plain hy2 link list
+}
+// Backwards-compatible name used by older call sites.
+function detectFormat(req) { return resolveClient(req); }
+
+function subUrls(req, token) {
+  const base = baseUrl(req) + '/sub/' + token;
+  const cbase = baseUrl(req) + '/c/?token=' + token;
+  return {
+    singbox: base + '?format=singbox',
+    clash: base + '?format=clash',
+    links: base + '?format=links',
+    b64: base + '?format=b64',
+    surge: base + '?format=surge',
+    uri: base + '?format=uri',
+    // sublinkPro consume endpoint (same token, client param):
+    c_url: cbase,
+    c_singbox: cbase + '&client=sing-box',
+    c_clash: cbase + '&client=clash',
+    c_mihomo: cbase + '&client=mihomo',
+    c_uri: cbase + '&client=uri',
+    c_v2ray: cbase + '&client=v2ray',
+    c_surge: cbase + '&client=surge',
+    // Plain base URL: UA-split (sing-box gets JSON, Clash gets YAML, browser gets HTML chooser).
+    url: base,
+    import_url: 'sing-box://import-remote-profile?url=' + encodeURIComponent(base + '?format=singbox'),
+  };
+}
+
+// Node-total traffic for Subscription-Userinfo: sums over MAPPED probe nodes only.
+// upload = sum month_tx, download = sum month_rx, total = sum traffic_limit (limit 0 excluded).
+// expire = last day of the current month, 23:59:59 local time.
+function probeTotals(probeNodes) {
+  let upload = 0, download = 0, total = 0;
+  for (const n of NODES) {
+    const p = probeNodes.find((x) => x.id === n.probe_node_id);
+    if (!p) continue;
+    upload += p.month_tx || 0;
+    download += p.month_rx || 0;
+    if (p.traffic_limit) total += p.traffic_limit;
+  }
+  const now = new Date();
+  // End of this month, 23:59:59 Asia/Shanghai (UTC+8, no DST) — not server-local time.
+  const expire = Date.UTC(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59) - 8 * 3600 * 1000;
+  return { upload, download, total, expire: Math.floor(expire / 1000) };
+}
+
+function userinfoHeader(t) {
+  const parts = ['upload=' + t.upload, 'download=' + t.download];
+  if (t.total > 0) parts.push('total=' + t.total);
+  parts.push('expire=' + t.expire);
+  return parts.join('; ');
+}
+
+// --- probe (1e.lol) ------------------------------------------------------
+let probeCache = { at: 0, data: null, source: 'live' };
+async function fetchProbe() {
+  const now = Date.now();
+  if (probeCache.data && now - probeCache.at < PROBE_CACHE_MS) return probeCache;
+  try {
+    const r = await fetch(PROBE_URL, { signal: AbortSignal.timeout(10000), headers: { Accept: 'application/json' } });
+    if (!r.ok) throw new Error('probe HTTP ' + r.status);
+    const j = await r.json();
+    if (!Array.isArray(j.nodes)) throw new Error('probe: no nodes array');
+    probeCache = { at: now, data: j.nodes, source: 'live' };
+    return probeCache;
+  } catch (e) {
+    console.error('Probe fetch failed, using labelled sample fallback:', e.message);
+    // Keep any stale live cache if we have it; otherwise sample (labelled).
+    if (probeCache.data) return { ...probeCache, source: 'live-stale' };
+    return { at: now, data: SAMPLE_PROBE, source: 'sample-fallback' };
+  }
+}
+
+function mapNodes(probeNodes) {
+  return NODES.map((n) => {
+    const p = probeNodes.find((x) => x.id === n.probe_node_id) || null;
+    if (!p) {
+      // Node is not in the probe (probe_node_id null or unknown): traffic
+      // and status are UNKNOWN — null, never fabricated zeros.
+      return { key: n.key, name: n.name, region: n.region, probe_node_id: n.probe_node_id ?? null, probe_name: n.probe_name, online: null, probe_missing: true, net_rx: null, net_tx: null, day_used: null, month_used: null, traffic_limit: null, remaining: null, pct_used: null, reset_day: null, cpu: null, uptime: null };
+    }
+    const m = p.metrics || {};
+    const monthRx = p.month_rx || 0, monthTx = p.month_tx || 0;
+    const monthUsed = typeof p.month_used === 'number' ? p.month_used : monthRx + monthTx;
+    const limit = p.traffic_limit || 0;
+    return {
+      key: n.key, name: n.name, region: n.region || p.country || '',
+      probe_node_id: p.id, probe_name: p.name,
+      online: !!p.online, net_rx: m.net_rx || 0, net_tx: m.net_tx || 0,
+      day_used: (p.day_rx || 0) + (p.day_tx || 0),
+      month_used: monthUsed, traffic_limit: limit,
+      remaining: limit ? Math.max(0, limit - monthUsed) : null,
+      pct_used: limit ? +(monthUsed / limit * 100).toFixed(2) : null,
+      reset_day: p.traffic_reset_day || 1, traffic_mode: p.traffic_mode || 'sum',
+      cpu: typeof m.cpu === 'number' ? m.cpu : null, uptime: m.uptime || null,
+    };
+  });
+}
+
+// --- EMOS ----------------------------------------------------------------
+async function emosCheck(token) {
+  const headers = { Authorization: 'Bearer ' + token, Accept: 'application/json' };
+  const [carrotRes, signRes] = await Promise.all([
+    fetch(EMOS_BASE + '/api/carrot/current', { headers, signal: AbortSignal.timeout(10000) }),
+    fetch(EMOS_BASE + '/api/sign/check', { headers, signal: AbortSignal.timeout(10000) }).catch(() => null),
+  ]);
+  if (!carrotRes.ok) throw new Error('EMOS carrot check failed: HTTP ' + carrotRes.status);
+  const carrotJson = await carrotRes.json();
+  const carrot = Number(carrotJson.carrot);
+  if (!Number.isFinite(carrot)) throw new Error('EMOS carrot response has no numeric carrot');
+  let userId = 'unknown', username = null;
+  if (signRes && signRes.ok) {
+    const s = await signRes.json().catch(() => ({}));
+    if (s.user_id) userId = s.user_id;
+  }
+  return { carrot, user_id: userId, username };
+}
+
+// --- handlers ------------------------------------------------------------
+async function handleAuth(req, res) {
+  let body;
+  try { body = await readBody(req); } catch (e) { return sendJson(res, 400, { ok: false, error: e.message }); }
+  const token = typeof body.token === 'string' ? body.token.trim() : '';
+  const demoCarrot = typeof body.carrot === 'number' ? body.carrot : (typeof body.carrot === 'string' && body.carrot !== '' ? Number(body.carrot) : NaN);
+
+  let result;
+  let demo = false;
+  if (token) {
+    try { result = await emosCheck(token); }
+    catch (e) { return sendJson(res, 502, { ok: false, error: 'EMOS check failed: ' + e.message }); }
+  } else if (Number.isFinite(demoCarrot)) {
+    demo = true;
+    result = { carrot: demoCarrot, user_id: 'demo-user', username: 'demo-user' };
+  } else {
+    return sendJson(res, 400, { ok: false, error: 'Provide {token} (EMOS Bearer token) or {carrot} (demo only)' });
+  }
+
+  const carrot = result.carrot;
+  if (!(carrot > CARROT_THRESHOLD)) {
+    return sendJson(res, 200, { ok: false, gated: false, user_id: result.user_id, username: result.username, carrot, threshold: CARROT_THRESHOLD, shortfall: CARROT_THRESHOLD + 1 - carrot, reason: 'carrot<=500' });
+  }
+  const sessionId = randHex(16);
+  const now = Date.now();
+  const share = createShare(sessionId, result.user_id);
+  const subToken = share.token;
+  sessions.set(sessionId, { user_id: result.user_id, username: result.username, carrot, emosToken: token || null, demo, expiresAt: now + SESSION_TTL_MS, lastCarrotCheck: now, shareToken: subToken });
+  const subUrl = baseUrl(req) + '/sub/' + subToken;
+  const urls = subUrls(req, subToken);
+  return sendJson(res, 200, { ok: true, gated: true, user_id: result.user_id, username: result.username, carrot, threshold: CARROT_THRESHOLD, demo, session: sessionId, sub_token: subToken, sub_url: subUrl, sub_urls: urls, import_url: urls.import_url, share: shareInfo(share), expires_in_seconds: Math.floor(SESSION_TTL_MS / 1000) });
+}
+
+async function handleNodes(req, res) {
+  const s = getSession(req);
+  if (!s) return sendJson(res, 401, { ok: false, error: 'missing or expired X-Session — login first' });
+  const probe = await fetchProbe();
+  const nodes = mapNodes(probe.data);
+  return sendJson(res, 200, { ok: true, user_id: s.user_id, carrot: s.carrot, demo: s.demo, probe_source: probe.source, probe_note: probe.source === 'live' ? 'live 1e.lol data' : 'SAMPLE fallback — probe fetch failed, values are NOT live', traffic_note: 'Node-total server traffic from probe (whole NIC, not hy2-only, not per-user)', nodes });
+}
+
+function handleSubLink(req, res) {
+  const s = getSession(req);
+  if (!s) return sendJson(res, 401, { ok: false, error: 'missing or expired X-Session — login first' });
+  const share = shares.get(s.shareToken);
+  const urls = subUrls(req, s.shareToken);
+  return sendJson(res, 200, { ok: true, user_id: s.user_id, demo: s.demo, sub_url: urls.url, sub_urls: urls, import_url: urls.import_url, share: shareInfo(share) });
+}
+
+// POST /api/sub/refresh — rotate the share token; the old token 403s immediately.
+function handleSubRefresh(req, res) {
+  const s = getSession(req);
+  if (!s) return sendJson(res, 401, { ok: false, error: 'missing or expired X-Session — login first' });
+  const old = shares.get(s.shareToken);
+  if (old) { old.enabled = false; shares.delete(s.shareToken); }
+  const share = createShare(s.sid, s.user_id);
+  const sess = sessions.get(s.sid);
+  if (sess) sess.shareToken = share.token;
+  const urls = subUrls(req, share.token);
+  return sendJson(res, 200, { ok: true, user_id: s.user_id, sub_token: share.token, sub_url: urls.url, sub_urls: urls, import_url: urls.import_url, share: shareInfo(share) });
+}
+
+// POST /api/sub/disable — disable the current share; /sub and /c return 403
+// until the user re-authenticates (which creates a fresh share).
+function handleSubDisable(req, res) {
+  const s = getSession(req);
+  if (!s) return sendJson(res, 401, { ok: false, error: 'missing or expired X-Session — login first' });
+  const share = shares.get(s.shareToken);
+  if (share) share.enabled = false;
+  return sendJson(res, 200, { ok: true, user_id: s.user_id, disabled: true, share: shareInfo(share) });
+}
+
+// Resolve a subscription token to its session, enforcing share + session
+// expiry and the EMOS carrot re-check for real sessions.
+async function resolveShare(req, res, token) {
+  const share = getShare(token);
+  if (!share) { sendJson(res, 403, { ok: false, error: 'invalid, disabled or expired subscription token' }); return null; }
+  const sess = sessions.get(share.sessionId);
+  if (!sess || Date.now() > sess.expiresAt) { shares.delete(token); sendJson(res, 403, { ok: false, error: 'subscription expired' }); return null; }
+  // Re-check carrot for real EMOS sessions (cached 10 min). Demo sessions skip.
+  if (sess.emosToken && Date.now() - sess.lastCarrotCheck > CARROT_RECHECK_MS) {
+    try {
+      const r = await emosCheck(sess.emosToken);
+      sess.carrot = r.carrot; sess.lastCarrotCheck = Date.now();
+      if (!(r.carrot > CARROT_THRESHOLD)) { sendJson(res, 403, { ok: false, error: 'carrot dropped to ' + r.carrot + ' (needs >500) — subscription revoked' }); return null; }
+    } catch (e) {
+      console.error('Sub re-check failed:', e.message);
+      sendJson(res, 502, { ok: false, error: 'EMOS re-check failed, try again later' }); return null;
+    }
+  }
+  // Access log (sublinkPro per-link access count + IP logs).
+  share.access_count += 1;
+  share.last_ip = clientIp(req);
+  share.last_user_agent = req.headers['user-agent'] || null;
+  share.last_access_at = Date.now();
+  return { share, sess };
+}
+
+async function serveSubscription(req, res, token) {
+  const resolved = await resolveShare(req, res, token);
+  if (!resolved) return;
+  const format = resolveClient(req);
+  const urls = subUrls(req, token);
+  // Subscription-Userinfo: NODE-TOTAL traffic (sum over mapped probe nodes),
+  // NOT per-user usage. upload=sum month_tx, download=sum month_rx,
+  // total=sum traffic_limit (limit-0 nodes excluded), expire=end of this month.
+  const probe = await fetchProbe();
+  const totals = probeTotals(probe.data);
+  const userinfo = userinfoHeader(totals);
+  // sublinkPro convention: never cache a subscription across devices;
+  // reverse proxies must preserve User-Agent (that is what picks the format).
+  const commonHeaders = { 'Cache-Control': 'private, no-store', 'Subscription-Userinfo': userinfo, 'Profile-Title': 'EMOS-gated sing-box' };
+
+  if (format === 'html') {
+    const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;');
+    const page = '<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>订阅 · EMOS-gated</title>'
+      + '<style>body{background:#0b0e14;color:#e6e6e6;font-family:system-ui,sans-serif;margin:0;padding:24px}.wrap{max-width:640px;margin:0 auto}.card{background:#151a23;border:1px solid #2a3342;border-radius:10px;padding:16px;margin:12px 0}a{color:#60a5fa}code{word-break:break-all;background:#0b0e14;padding:2px 6px;border-radius:6px}.muted{color:#9aa4b2;font-size:13px}</style></head><body><div class="wrap">'
+      + '<h1>订阅链接</h1><p class="muted">这是你的专属订阅地址（分享链接有效期见控制台，萝卜掉到 ≤ 500 即失效）。请在客户端里粘贴对应的链接，不要用浏览器直接下载——浏览器不知道该用什么客户端打开。</p>'
+      + '<div class="card"><h2>sing-box / Hiddify / Karing</h2><p><a href="' + esc(urls.c_singbox) + '">' + esc(urls.c_singbox) + '</a></p><p><a href="' + esc(urls.import_url) + '">一键导入 sing-box</a></p></div>'
+      + '<div class="card"><h2>Clash / mihomo</h2><p><a href="' + esc(urls.c_clash) + '">' + esc(urls.c_clash) + '</a></p></div>'
+      + '<div class="card"><h2>Surge</h2><p><a href="' + esc(urls.c_surge) + '">' + esc(urls.c_surge) + '</a></p></div>'
+      + '<div class="card"><h2>通用链接（hy2 / vless 列表，Shadowrocket / Loon / Egern 等）</h2><p><a href="' + esc(urls.c_uri) + '">' + esc(urls.c_uri) + '</a></p><p><a href="' + esc(urls.c_v2ray) + '">base64 版</a></p></div>'
+      + '<p class="muted">同一个 token，/c/?client= 按客户端分流（sublinkPro 风格）；/sub/&lt;token&gt;?format= 同样可用。流量头 Subscription-Userinfo 是节点总流量（探针里各节点本月上行/下行/限额之和），不是你个人的用量；到期时间为本月底 23:59。</p>'
+      + '</div></body></html>';
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', ...commonHeaders });
+    return res.end(page);
+  }
+  if (format === 'clash') {
+    res.writeHead(200, { 'Content-Type': 'text/yaml; charset=utf-8', 'profile-update-interval': '24', ...commonHeaders });
+    return res.end(buildClashYaml());
+  }
+  if (format === 'surge') {
+    res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8', ...commonHeaders });
+    return res.end(buildSurgeConfig(req, token));
+  }
+  if (format === 'links') {
+    res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8', ...commonHeaders });
+    return res.end(buildLinksText());
+  }
+  if (format === 'b64') {
+    res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8', ...commonHeaders });
+    return res.end(Buffer.from(buildLinksText(), 'utf8').toString('base64') + '\n');
+  }
+  // singbox (default for sing-box / Hiddify / Karing UA, and ?format=singbox)
+  const cfg = buildSingBoxConfig();
+  res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', ...commonHeaders });
+  res.end(JSON.stringify(cfg, null, 2));
+}
+
+async function handleSub(req, res, subToken) { return serveSubscription(req, res, subToken); }
+
+// --- admin API handlers ---------------------------------------------------
+async function handleAdminLogin(req, res) {
+  if (!ADMIN_TOKEN) return sendJson(res, 503, { ok: false, error: 'admin not configured: set ADMIN_TOKEN env and restart the server' });
+  let body;
+  try { body = await readBody(req); } catch (e) { return sendJson(res, 400, { ok: false, error: e.message }); }
+  const token = typeof body.token === 'string' ? body.token : '';
+  let ok = false;
+  if (token.length === ADMIN_TOKEN.length && token.length > 0) {
+    try { ok = crypto.timingSafeEqual(Buffer.from(token), Buffer.from(ADMIN_TOKEN)); } catch (e) { ok = false; }
+  }
+  if (!ok) return sendJson(res, 401, { ok: false, error: 'wrong admin token' });
+  const sid = randHex(16);
+  adminSessions.set(sid, { createdAt: Date.now(), expiresAt: Date.now() + ADMIN_SESSION_TTL_MS });
+  res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'Set-Cookie': 'admin_session=' + sid + '; HttpOnly; Path=/; Max-Age=86400; SameSite=Lax' });
+  return res.end(JSON.stringify({ ok: true }));
+}
+function handleAdminLogout(req, res) {
+  const c = parseCookies(req).admin_session;
+  if (c) adminSessions.delete(c);
+  res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'Set-Cookie': 'admin_session=; HttpOnly; Path=/; Max-Age=0; SameSite=Lax' });
+  return res.end(JSON.stringify({ ok: true }));
+}
+function handleAdminPage(req, res) {
+  if (!ADMIN_TOKEN) {
+    res.writeHead(503, { 'Content-Type': 'text/html; charset=utf-8' });
+    return res.end('<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><title>后台未配置</title></head><body style="font-family:system-ui;background:#0b0e14;color:#e6e6e6;padding:24px"><h1>后台未配置</h1><p>需要先设置环境变量 <code>ADMIN_TOKEN</code> 再启动服务，例如：<code>ADMIN_TOKEN=你的口令 node server.js</code>，然后重新打开 /admin。不要把口令写进任何文件或聊天记录。</p></body></html>');
+  }
+  res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+  return res.end(ADMIN_HTML);
+}
+async function handleAdminApi(req, res) {
+  const u = new URL(req.url, 'http://localhost');
+  const p = u.pathname;
+  if (!requireAdmin(req, res)) return;
+  const readJsonBody = async () => {
+    try { return await readBody(req); } catch (e) { return null; }
+  };
+  // ---- Nodes ----
+  if (req.method === 'GET' && p === '/api/admin/nodes') {
+    const probe = await fetchProbe();
+    const probeMap = new Map(probe.data.map((x) => [x.id, x]));
+    return sendJson(res, 200, { ok: true, probe_source: probe.source, nodes: NODES.map((n) => nodeAdminView(n, probeMap)) });
+  }
+  if (req.method === 'POST' && p === '/api/admin/nodes/parse') {
+    const body = await readJsonBody();
+    if (!body) return sendJson(res, 400, { ok: false, error: 'invalid JSON' });
+    const link = typeof body.link === 'string' ? body.link.trim() : '';
+    if (!link) return sendJson(res, 400, { ok: false, error: 'link is required' });
+    const { protocol, parsed } = parseAnyLink(link, '');
+    if (!protocol || !parsed) return sendJson(res, 400, { ok: false, error: 'unsupported or unparsable link: only hy2://, hysteria2:// and vless:// are accepted' });
+    return sendJson(res, 200, { ok: true, protocol, parsed });
+  }
+  if (req.method === 'POST' && p === '/api/admin/nodes') {
+    const body = await readJsonBody();
+    if (!body) return sendJson(res, 400, { ok: false, error: 'invalid JSON' });
+    const link = typeof body.link === 'string' ? body.link.trim() : '';
+    if (!link) return sendJson(res, 400, { ok: false, error: 'link is required' });
+    const { protocol, parsed } = parseAnyLink(link, '');
+    if (!protocol || !parsed) return sendJson(res, 400, { ok: false, error: 'unsupported or unparsable link: only hy2://, hysteria2:// and vless:// are accepted' });
+    const probeId = validateProbeId(body.probe_node_id);
+    if (probeId === undefined) return sendJson(res, 400, { ok: false, error: 'probe_node_id must be a positive integer or null' });
+    const region = typeof body.region === 'string' ? body.region.trim().toUpperCase() : '';
+    let name = typeof body.name === 'string' ? body.name.trim() : '';
+    if (!name) name = parsed.tag || (protocol + ' node');
+    if (region && name.indexOf('·') < 0) name = region + ' · ' + name;
+    let key = typeof body.key === 'string' ? slugify(body.key) : '';
+    if (key) {
+      if (NODES.some((n) => n.key === key)) return sendJson(res, 400, { ok: false, error: 'key already exists: ' + key });
+    } else {
+      key = uniqueKey(protocol + '-' + slugify((region ? region + '-' : '') + shortName({ name })));
+    }
+    const node = { key, name, region, link, probe_node_id: probeId, probe_name: null };
+    NODES.push(node);
+    saveNodesConfig();
+    return sendJson(res, 200, { ok: true, node });
+  }
+  if (req.method === 'POST' && p === '/api/admin/nodes/reorder') {
+    const body = await readJsonBody();
+    if (!body || !Array.isArray(body.keys)) return sendJson(res, 400, { ok: false, error: 'keys: [...] is required' });
+    const keys = body.keys.map((k) => String(k));
+    const current = NODES.map((n) => n.key);
+    if (keys.length !== current.length || keys.some((k) => current.indexOf(k) < 0)) {
+      return sendJson(res, 400, { ok: false, error: 'keys must contain exactly the current node keys, in the new order' });
+    }
+    NODES = keys.map((k) => NODES.find((n) => n.key === k));
+    saveNodesConfig();
+    return sendJson(res, 200, { ok: true, keys: NODES.map((n) => n.key) });
+  }
+  const nodeMatch = p.match(/^\/api\/admin\/nodes\/([^/]+)$/);
+  if (nodeMatch && (req.method === 'PUT' || req.method === 'DELETE')) {
+    const key = decodeURIComponent(nodeMatch[1]);
+    const idx = NODES.findIndex((n) => n.key === key);
+    if (idx < 0) return sendJson(res, 404, { ok: false, error: 'node not found: ' + key });
+    if (req.method === 'DELETE') {
+      const removed = NODES.splice(idx, 1)[0];
+      saveNodesConfig();
+      return sendJson(res, 200, { ok: true, removed: { key: removed.key, name: removed.name } });
+    }
+    const body = await readJsonBody();
+    if (!body) return sendJson(res, 400, { ok: false, error: 'invalid JSON' });
+    const n = NODES[idx];
+    if (typeof body.link === 'string' && body.link.trim()) {
+      const link = body.link.trim();
+      const r = parseAnyLink(link, '');
+      if (!r.protocol || !r.parsed) return sendJson(res, 400, { ok: false, error: 'unsupported or unparsable link: only hy2://, hysteria2:// and vless:// are accepted' });
+      n.link = link;
+      delete n.hy2_link;
+    }
+    if (typeof body.name === 'string' && body.name.trim()) n.name = body.name.trim();
+    if (typeof body.region === 'string') n.region = body.region.trim().toUpperCase();
+    if ('probe_node_id' in body) {
+      const pid = validateProbeId(body.probe_node_id);
+      if (pid === undefined) return sendJson(res, 400, { ok: false, error: 'probe_node_id must be a positive integer or null' });
+      n.probe_node_id = pid;
+    }
+    if ('probe_name' in body && (body.probe_name === null || typeof body.probe_name === 'string')) n.probe_name = body.probe_name || null;
+    saveNodesConfig();
+    return sendJson(res, 200, { ok: true, node: n });
+  }
+  // ---- Shares ----
+  if (req.method === 'GET' && p === '/api/admin/shares') {
+    const list = [...shares.values()].sort((a, b) => b.created_at - a.created_at).map(adminShareInfo);
+    return sendJson(res, 200, { ok: true, count: list.length, shares: list, note: 'Shares are created by EMOS login (one per user_id); the admin cannot mint a share without a user_id.' });
+  }
+  if (req.method === 'POST' && p === '/api/admin/shares/revoke-all') {
+    const count = shares.size;
+    shares.clear();
+    return sendJson(res, 200, { ok: true, revoked: count, note: 'All subscription tokens are now invalid; users must log in again to get a new share.' });
+  }
+  const shareAction = p.match(/^\/api\/admin\/shares\/([^/]+)\/(refresh|enable|disable)$/);
+  if (req.method === 'POST' && shareAction) {
+    const s = findShareByRef(decodeURIComponent(shareAction[1]));
+    if (!s) return sendJson(res, 404, { ok: false, error: 'share not found' });
+    const action = shareAction[2];
+    if (action === 'refresh') {
+      shares.delete(s.token);
+      const ns = createShare(s.sessionId, s.user_id);
+      const sess = sessions.get(s.sessionId);
+      if (sess) sess.shareToken = ns.token;
+      return sendJson(res, 200, { ok: true, share: adminShareInfo(ns), note: 'old token is invalid immediately' });
+    }
+    s.enabled = action === 'enable';
+    return sendJson(res, 200, { ok: true, share: adminShareInfo(s) });
+  }
+  const shareDel = p.match(/^\/api\/admin\/shares\/([^/]+)$/);
+  if (req.method === 'DELETE' && shareDel) {
+    const s = findShareByRef(decodeURIComponent(shareDel[1]));
+    if (!s) return sendJson(res, 404, { ok: false, error: 'share not found' });
+    shares.delete(s.token);
+    return sendJson(res, 200, { ok: true, revoked: s.id || s.token });
+  }
+  // ---- Settings ----
+  if (req.method === 'GET' && p === '/api/admin/settings') {
+    return sendJson(res, 200, { ok: true, settings: { carrot_threshold: CARROT_THRESHOLD, share_ttl_hours: SHARE_TTL_HOURS, name_rule: NAME_RULE, probe_cache_seconds: Math.floor(PROBE_CACHE_MS / 1000) }, sources: SETTINGS_SOURCES, note: 'Precedence at startup: env var > config/settings.json > default. A PUT applies immediately in-memory and writes settings.json; a restart with the env var set reverts that field to the env value.' });
+  }
+  if (req.method === 'PUT' && p === '/api/admin/settings') {
+    const body = await readJsonBody();
+    if (!body) return sendJson(res, 400, { ok: false, error: 'invalid JSON' });
+    const warnings = [];
+    if ('carrot_threshold' in body) {
+      const v = body.carrot_threshold;
+      if (!Number.isInteger(v) || v < 0) return sendJson(res, 400, { ok: false, error: 'carrot_threshold must be an integer >= 0' });
+      CARROT_THRESHOLD = v;
+      SETTINGS_SOURCES.carrot_threshold = 'settings';
+      if (process.env.CARROT_THRESHOLD) warnings.push('CARROT_THRESHOLD env is set; this value will be overridden by the env value on restart.');
+    }
+    if ('share_ttl_hours' in body) {
+      const v = body.share_ttl_hours;
+      if (typeof v !== 'number' || !Number.isFinite(v) || v < 0) return sendJson(res, 400, { ok: false, error: 'share_ttl_hours must be a number >= 0 (0 = never expires)' });
+      SHARE_TTL_HOURS = v;
+      SETTINGS_SOURCES.share_ttl_hours = 'settings';
+      if (process.env.SHARE_TTL_HOURS) warnings.push('SHARE_TTL_HOURS env is set; this value will be overridden by the env value on restart.');
+    }
+    if ('name_rule' in body) {
+      const v = body.name_rule;
+      if (typeof v !== 'string' || !v.trim()) return sendJson(res, 400, { ok: false, error: 'name_rule must be a non-empty string' });
+      NAME_RULE = v.trim();
+      SETTINGS_SOURCES.name_rule = 'settings';
+    }
+    if ('probe_cache_seconds' in body) {
+      const v = body.probe_cache_seconds;
+      if (!Number.isInteger(v) || v < 5 || v > 3600) return sendJson(res, 400, { ok: false, error: 'probe_cache_seconds must be an integer between 5 and 3600' });
+      PROBE_CACHE_MS = v * 1000;
+      SETTINGS_SOURCES.probe_cache_seconds = 'settings';
+      if (process.env.PROBE_CACHE_SECONDS) warnings.push('PROBE_CACHE_SECONDS env is set; this value will be overridden by the env value on restart.');
+    }
+    const saved = saveSettingsFile();
+    return sendJson(res, 200, { ok: true, settings: saved, sources: SETTINGS_SOURCES, warnings });
+  }
+  // ---- Health ----
+  if (req.method === 'GET' && p === '/api/admin/health') {
+    const probe = await fetchProbe();
+    return sendJson(res, 200, { ok: true, admin_configured: !!ADMIN_TOKEN, nodes: NODES.length, shares: shares.size, sessions: sessions.size, probe_source: probe.source, probe_nodes: probe.data ? probe.data.length : 0, uptime_seconds: Math.floor(process.uptime()), carrot_threshold: CARROT_THRESHOLD });
+  }
+  return sendJson(res, 404, { ok: false, error: 'unknown admin endpoint' });
+}
+
+// --- admin page (single page, plain HTML/JS, no build step) ---------------
+const ADMIN_HTML = `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>后台管理 · EMOS 订阅网关</title><style>
+body{background:#0b0e14;color:#e6e6e6;font-family:system-ui,-apple-system,sans-serif;margin:0;padding:24px}.wrap{max-width:1000px;margin:0 auto}h1{font-size:20px}h2{font-size:16px;margin-top:28px}.card{background:#151a23;border:1px solid #2a3342;border-radius:10px;padding:16px;margin:12px 0}input,textarea{width:100%;box-sizing:border-box;background:#0b0e14;color:#e6e6e6;border:1px solid #2a3342;border-radius:8px;padding:10px;margin:6px 0}button{background:#3b82f6;color:#fff;border:0;border-radius:8px;padding:10px 16px;cursor:pointer;margin:4px 6px 4px 0}button.ghost{background:#26303f}button.danger{background:#b91c1c}button:disabled{opacity:.5}table{width:100%;border-collapse:collapse;font-size:14px}th,td{text-align:left;padding:8px;border-bottom:1px solid #2a3342;vertical-align:top}.muted{color:#9aa4b2;font-size:13px}.bad{color:#ef4444}.ok{color:#22c55e}code{word-break:break-all;background:#0b0e14;padding:2px 6px;border-radius:6px}.hidden{display:none}pre{background:#0b0e14;border:1px solid #2a3342;border-radius:8px;padding:12px;overflow:auto;font-size:13px}a{color:#60a5fa}.row{display:flex;gap:12px}.row>div{flex:1}
+</style></head><body><div class="wrap"><h1>后台管理 <span class="muted">· EMOS 订阅网关</span></h1>
+<p class="muted">只有站长能进：管理节点（订阅内容）、分享链接、设置。用户控制台在 <a href="/">/</a>，不受后台改动影响（节点改完订阅立即生效，不用重启）。</p>
+<div class="card" id="loginCard"><h2>登录</h2>
+<label class="muted">管理员口令（ADMIN_TOKEN）</label><input id="adminToken" type="password" placeholder="输入 ADMIN_TOKEN" autocomplete="off">
+<button id="btnAdminLogin">登录</button><p id="adminMsg" class="muted"></p></div>
+<div class="hidden" id="adminApp">
+<p><span id="healthLine" class="muted"></span> <button class="ghost" id="btnLogout">退出登录</button></p>
+<div class="card"><h2>节点</h2>
+<p class="muted" id="probeNote"></p>
+<table><thead><tr><th>Key</th><th>名称</th><th>协议</th><th>服务器</th><th>探针</th><th>操作</th></tr></thead><tbody id="nodeRows"></tbody></table>
+<h2 id="formTitle">添加节点</h2>
+<label class="muted">节点链接（hy2:// / hysteria2:// / vless://，粘贴后先点“解析预览”，确认无误再保存）</label>
+<textarea id="nodeLink" rows="3" placeholder="hysteria2://密码@域名:端口?sni=域名&obfs=salamander&obfs-password=xxx#名字"></textarea>
+<div class="row"><div><label class="muted">显示名（可空，默认用链接里的名字）</label><input id="nodeName" placeholder="例如 PSM-sb-hy2-opju"></div>
+<div><label class="muted">地区代码（可空，如 HK / JP / US）</label><input id="nodeRegion" placeholder="JP"></div></div>
+<div class="row"><div><label class="muted">探针 id（可空，不在探针里就留空）</label><input id="nodeProbe" type="number" placeholder="20"></div>
+<div><label class="muted">Key（可空，自动生成，唯一）</label><input id="nodeKey" placeholder="hy2-jp-xxx"></div></div>
+<button id="btnParse">解析预览</button> <button id="btnSaveNode">保存节点</button> <button class="ghost hidden" id="btnCancelEdit">取消编辑</button>
+<pre id="nodePreview" class="hidden"></pre><p id="nodeMsg" class="muted"></p></div>
+<div class="card"><h2>分享链接（订阅）</h2>
+<p class="muted">分享由用户 EMOS 登录后自动创建（每人一条，绑定 user_id），后台不能凭空给某人发一条。token 只显示前 6 位；刷新会让旧链接立即失效，停用后用户重新登录才能恢复。</p>
+<table><thead><tr><th>Token</th><th>用户</th><th>创建 / 到期</th><th>状态</th><th>访问</th><th>最后 IP / 访问</th><th>操作</th></tr></thead><tbody id="shareRows"></tbody></table>
+<button class="danger" id="btnRevokeAll">全部吊销（所有订阅立即失效）</button> <span id="shareMsg" class="muted"></span></div>
+<div class="card"><h2>设置</h2>
+<div class="row"><div><label class="muted">萝卜门槛（carrot 必须 &gt; 此值，默认 500）</label><input id="setThreshold" type="number"></div>
+<div><label class="muted">分享有效期（小时，0 = 永不过期，默认 24）</label><input id="setTtl" type="number" step="any"></div></div>
+<div class="row"><div><label class="muted">探针缓存（秒，默认 30）</label><input id="setProbeCache" type="number"></div>
+<div><label class="muted">节点命名规则</label><input id="setNameRule"></div></div>
+<p class="muted" id="setSources"></p>
+<button id="btnSaveSettings">保存设置</button> <span id="setMsg" class="muted"></span></div>
+</div></div>
+<script>
+var nodes=[],editingKey=null;
+function esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;')}
+function fmtTime(t){return t?new Date(t).toLocaleString():'—'}
+async function api(method,path,body){var o={method:method,credentials:'include',headers:{'Content-Type':'application/json'}};if(body!==undefined)o.body=JSON.stringify(body);var r=await fetch(path,o);var j=null;try{j=await r.json()}catch(e){}return{status:r.status,json:j||{}}}
+function showLogin(msg){document.getElementById('loginCard').classList.remove('hidden');document.getElementById('adminApp').classList.add('hidden');if(msg)document.getElementById('adminMsg').textContent=msg}
+function showApp(){document.getElementById('loginCard').classList.add('hidden');document.getElementById('adminApp').classList.remove('hidden')}
+async function loadHealth(){var r=await api('GET','/api/admin/health');if(r.status!==200)return;var j=r.json;document.getElementById('healthLine').textContent='节点 '+j.nodes+' 条 · 分享 '+j.shares+' 条 · 登录会话 '+j.sessions+' 个 · 探针：'+j.probe_source+'（'+j.probe_nodes+' 台）· 门槛 > '+j.carrot_threshold}
+async function loadNodes(){var r=await api('GET','/api/admin/nodes');if(r.status===401){showLogin('登录已过期，请重新登录。');return false}if(r.status===503){showLogin('后台未配置：服务器没有设置 ADMIN_TOKEN。');return false}if(!r.json.ok){document.getElementById('nodeMsg').textContent='拉取失败：'+(r.json.error||'');return false}nodes=r.json.nodes;document.getElementById('probeNote').textContent='探针来源：'+r.json.probe_source+'（只做节点总流量）';var h='';nodes.forEach(function(n,i){h+='<tr><td><code>'+esc(n.key)+'</code></td><td><b>'+esc(n.name)+'</b><br><span class="muted">'+esc(n.region)+'</span></td><td>'+esc(n.protocol||'—')+'</td><td>'+esc(n.server||'—')+':'+(n.server_port==null?'—':n.server_port)+'<br><span class="muted">sni: '+esc(n.sni||'—')+'</span></td><td>'+(n.probe_node_id==null?'—':('#'+n.probe_node_id+' '+(n.online===true?'<span class="ok">在线</span>':n.online===false?'<span class="bad">离线</span>':'<span class="muted">不在探针里</span>')))+'</td><td><button onclick="editNode('+i+')">编辑</button> <button class="ghost" onclick="moveNode('+i+',-1)">↑</button><button class="ghost" onclick="moveNode('+i+',1)">↓</button> <button class="danger" onclick="delNode(\''+esc(n.key)+'\')">删除</button></td></tr>'});document.getElementById('nodeRows').innerHTML=h||'<tr><td colspan="6">暂无节点</td></tr>';return true}
+async function loadShares(){var r=await api('GET','/api/admin/shares');if(r.status!==200)return;var h='';r.json.shares.forEach(function(s){h+='<tr><td><code>'+esc(s.token_masked)+'</code></td><td><code>'+esc(s.user_id)+'</code></td><td>'+fmtTime(s.created_at)+'<br><span class="muted">到期：'+fmtTime(s.expires_at)+'</span></td><td>'+(s.enabled?'<span class="ok">启用</span>':'<span class="bad">停用</span>')+'</td><td>'+s.access_count+' 次</td><td>'+esc(s.last_ip||'—')+'<br><span class="muted">'+fmtTime(s.last_access_at)+'</span></td><td><button onclick="shareAct(\''+s.id+'\',\'refresh\')">刷新</button> '+(s.enabled?'<button class="ghost" onclick="shareAct(\''+s.id+'\',\'disable\')">停用</button>':'<button class="ghost" onclick="shareAct(\''+s.id+'\',\'enable\')">启用</button>')+' <button class="danger" onclick="shareDel(\''+s.id+'\')">吊销</button></td></tr>'});document.getElementById('shareRows').innerHTML=h||'<tr><td colspan="7">暂无分享（还没有用户登录过）</td></tr>'}
+async function loadSettings(){var r=await api('GET','/api/admin/settings');if(r.status!==200)return;var s=r.json.settings;document.getElementById('setThreshold').value=s.carrot_threshold;document.getElementById('setTtl').value=s.share_ttl_hours;document.getElementById('setNameRule').value=s.name_rule;document.getElementById('setProbeCache').value=s.probe_cache_seconds;var src=r.json.sources;document.getElementById('setSources').textContent='来源：门槛='+src.carrot_threshold+'，有效期='+src.share_ttl_hours+'，命名='+src.name_rule+'，探针缓存='+src.probe_cache_seconds+'。优先级：启动时环境变量 > settings.json > 默认值。'}
+async function loadAll(){var ok=await loadNodes();if(!ok)return;showApp();await loadShares();await loadSettings();await loadHealth()}
+window.editNode=function(i){var n=nodes[i];if(!n)return;editingKey=n.key;document.getElementById('formTitle').textContent='编辑节点：'+n.key;document.getElementById('nodeLink').value=n.link||'';document.getElementById('nodeName').value=n.name;document.getElementById('nodeRegion').value=n.region||'';document.getElementById('nodeProbe').value=n.probe_node_id==null?'':n.probe_node_id;document.getElementById('nodeKey').value=n.key;document.getElementById('nodeKey').disabled=true;document.getElementById('btnCancelEdit').classList.remove('hidden');document.getElementById('nodeMsg').textContent='正在编辑 '+n.key+'：改链接会重新解析；不改链接只改名字/地区/探针 id。';window.scrollTo(0,document.getElementById('formTitle').offsetTop)};
+window.delNode=async function(key){if(!confirm('确定删除节点 '+key+'？订阅里会立刻去掉它。'))return;var r=await api('DELETE','/api/admin/nodes/'+encodeURIComponent(key));if(!r.json.ok){document.getElementById('nodeMsg').textContent='删除失败：'+(r.json.error||'');return}document.getElementById('nodeMsg').textContent='已删除 '+key+'。';await loadNodes();await loadHealth()};
+window.moveNode=async function(i,dir){var j=i+dir;if(j<0||j>=nodes.length)return;var keys=nodes.map(function(n){return n.key});var t=keys[i];keys[i]=keys[j];keys[j]=t;var r=await api('POST','/api/admin/nodes/reorder',{keys:keys});if(!r.json.ok){document.getElementById('nodeMsg').textContent='排序失败：'+(r.json.error||'');return}await loadNodes()};
+window.shareAct=async function(id,action){var r=await api('POST','/api/admin/shares/'+encodeURIComponent(id)+'/'+action);if(!r.json.ok){document.getElementById('shareMsg').textContent='操作失败：'+(r.json.error||'');return}document.getElementById('shareMsg').textContent=action==='refresh'?'已刷新，旧链接立即失效。':(action==='disable'?'已停用。':'已启用。');await loadShares()};
+window.shareDel=async function(id){if(!confirm('确定吊销这条分享？对应用户的订阅链接立即失效。'))return;var r=await api('DELETE','/api/admin/shares/'+encodeURIComponent(id));if(!r.json.ok){document.getElementById('shareMsg').textContent='吊销失败：'+(r.json.error||'');return}document.getElementById('shareMsg').textContent='已吊销。';await loadShares()};
+document.getElementById('btnAdminLogin').onclick=async function(){var t=document.getElementById('adminToken').value;if(!t){document.getElementById('adminMsg').textContent='先输入口令。';return}var r=await api('POST','/api/admin/login',{token:t});if(r.status===503){document.getElementById('adminMsg').textContent='后台未配置：服务器没有设置 ADMIN_TOKEN。';return}if(!r.json.ok){document.getElementById('adminMsg').textContent='登录失败：'+(r.json.error||'');return}document.getElementById('adminToken').value='';await loadAll()};
+document.getElementById('btnLogout').onclick=async function(){await api('POST','/api/admin/logout');showLogin('已退出。')};
+document.getElementById('btnParse').onclick=async function(){var link=document.getElementById('nodeLink').value.trim();if(!link){document.getElementById('nodeMsg').textContent='先粘贴节点链接。';return}var r=await api('POST','/api/admin/nodes/parse',{link:link});var pre=document.getElementById('nodePreview');pre.classList.remove('hidden');if(!r.json.ok){pre.textContent='解析失败：'+(r.json.error||'');return}pre.textContent='协议：'+r.json.protocol+'\n'+JSON.stringify(r.json.parsed,null,2);document.getElementById('nodeMsg').textContent='解析成功，确认无误后点“保存节点”。'};
+document.getElementById('btnSaveNode').onclick=async function(){var link=document.getElementById('nodeLink').value.trim();var name=document.getElementById('nodeName').value.trim();var region=document.getElementById('nodeRegion').value.trim();var probe=document.getElementById('nodeProbe').value;var key=document.getElementById('nodeKey').value.trim();if(!link){document.getElementById('nodeMsg').textContent='链接不能为空。';return}var body={link:link,name:name,region:region,probe_node_id:probe===''?null:Number(probe)};var r;if(editingKey){r=await api('PUT','/api/admin/nodes/'+encodeURIComponent(editingKey),body)}else{if(key)body.key=key;r=await api('POST','/api/admin/nodes',body)}if(!r.json.ok){document.getElementById('nodeMsg').textContent='保存失败：'+(r.json.error||'');return}document.getElementById('nodeMsg').textContent='已保存：'+(r.json.node&&r.json.node.key);editingKey=null;document.getElementById('formTitle').textContent='添加节点';document.getElementById('nodeLink').value='';document.getElementById('nodeName').value='';document.getElementById('nodeRegion').value='';document.getElementById('nodeProbe').value='';document.getElementById('nodeKey').value='';document.getElementById('nodeKey').disabled=false;document.getElementById('btnCancelEdit').classList.add('hidden');document.getElementById('nodePreview').classList.add('hidden');await loadNodes();await loadHealth()};
+document.getElementById('btnCancelEdit').onclick=function(){editingKey=null;document.getElementById('formTitle').textContent='添加节点';document.getElementById('nodeLink').value='';document.getElementById('nodeName').value='';document.getElementById('nodeRegion').value='';document.getElementById('nodeProbe').value='';document.getElementById('nodeKey').value='';document.getElementById('nodeKey').disabled=false;document.getElementById('btnCancelEdit').classList.add('hidden');document.getElementById('nodeMsg').textContent=''};
+document.getElementById('btnRevokeAll').onclick=async function(){if(!confirm('确定吊销全部订阅链接？所有用户的订阅立即失效，他们需要重新登录。'))return;var r=await api('POST','/api/admin/shares/revoke-all');if(!r.json.ok){document.getElementById('shareMsg').textContent='操作失败：'+(r.json.error||'');return}document.getElementById('shareMsg').textContent='已吊销 '+r.json.revoked+' 条分享。';await loadShares()};
+document.getElementById('btnSaveSettings').onclick=async function(){var body={carrot_threshold:Number(document.getElementById('setThreshold').value),share_ttl_hours:Number(document.getElementById('setTtl').value),name_rule:document.getElementById('setNameRule').value,probe_cache_seconds:Number(document.getElementById('setProbeCache').value)};var r=await api('PUT','/api/admin/settings',body);if(!r.json.ok){document.getElementById('setMsg').textContent='保存失败：'+(r.json.error||'');return}var w=(r.json.warnings||[]).join(' ');document.getElementById('setMsg').textContent='已保存，立即生效。'+(w?' 注意：'+w:'');await loadSettings()};
+loadAll();
+</script></body></html>`;
+
+// --- console HTML (single page, no dependencies) -------------------------
+const HTML = '<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>EMOS 订阅控制台 · 原型</title><style>'
+  + 'body{background:#0b0e14;color:#e6e6e6;font-family:system-ui,-apple-system,sans-serif;margin:0;padding:24px} .wrap{max-width:900px;margin:0 auto} h1{font-size:20px} h2{font-size:16px;margin-top:28px} .card{background:#151a23;border:1px solid #2a3342;border-radius:10px;padding:16px;margin:12px 0} input{width:100%;box-sizing:border-box;background:#0b0e14;color:#e6e6e6;border:1px solid #2a3342;border-radius:8px;padding:10px;margin:6px 0} button{background:#3b82f6;color:#fff;border:0;border-radius:8px;padding:10px 16px;cursor:pointer;margin:4px 6px 4px 0} button.ghost{background:#26303f} button:disabled{opacity:.5} table{width:100%;border-collapse:collapse;font-size:14px} th,td{text-align:left;padding:8px;border-bottom:1px solid #2a3342;vertical-align:top} .bar{height:8px;background:#26303f;border-radius:4px;overflow:hidden;margin-top:4px} .bar i{display:block;height:100%;background:#3b82f6} .dot{display:inline-block;width:9px;height:9px;border-radius:50%;background:#22c55e} .dot.off{background:#ef4444} .muted{color:#9aa4b2;font-size:13px} .warn{color:#fbbf24} .ok{color:#22c55e} .bad{color:#ef4444} code{word-break:break-all;background:#0b0e14;padding:2px 6px;border-radius:6px} .hidden{display:none} a{color:#60a5fa}'
+  + '</style></head><body><div class="wrap"><h1>EMOS 订阅控制台 <span class="muted">· 原型</span></h1>'
+  + '<p class="muted">EMOS 登录 → 萝卜 &gt; 500 才能进控制台。节点流量是探针里的整台服务器流量（不是单条节点、不是每人用量）。</p>'
+  + '<div class="card" id="loginCard"><h2>登录</h2>'
+  + '<label class="muted">EMOS Bearer Token（真实模式）</label><input id="token" type="password" placeholder="粘贴 EMOS token（只发给本服务器，不会保存到聊天记录）" autocomplete="off">'
+  + '<button id="btnToken">用 EMOS Token 登录</button>'
+  + '<p class="muted">或演示模式：直接填萝卜数，不调 EMOS。</p>'
+  + '<label class="muted">演示萝卜数</label><input id="demoCarrot" type="number" value="600">'
+  + '<button id="btnDemo">演示登录</button> <button class="ghost" id="btnDemo600">演示：600（达标）</button> <button class="ghost" id="btnDemo400">演示：400（不达标）</button>'
+  + '<p id="loginMsg" class="muted"></p></div>'
+  + '<div class="card hidden" id="gatedCard"><h2>未达标</h2><p id="gatedMsg"></p><p class="muted">萝卜 &gt; 500 才能看到节点和订阅链接。去 EMOS 签到 / 赚萝卜后再来。</p></div>'
+  + '<div class="hidden" id="dash"><div class="card"><h2>已达标 <span id="demoBadge"></span></h2><p>用户：<code id="who"></code> · 萝卜：<b id="carrotOut"></b>（门槛 &gt; 500）</p>'
+  + '<p>订阅链接（每人专属，24 小时有效；按客户端选一种粘贴）：</p>'
+  + '<p>sing-box / Hiddify / Karing（JSON）：<br><code id="subSingbox"></code> <button id="btnCopySingbox">复制</button></p>'
+  + '<p>Clash / mihomo / Stash / Verge（YAML）：<br><code id="subClash"></code> <button id="btnCopyClash">复制</button></p>'
+  + '<p>Surge：<br><code id="subSurge"></code> <button id="btnCopySurge">复制</button></p>'
+  + '<p>通用链接（hy2 / vless 列表，Shadowrocket / Loon / Egern 等）：<br><code id="subLinks"></code> <button id="btnCopyLinks">复制</button></p>'
+  + '<p class="muted">三个地址是同一个订阅 token、按格式分流；/c/?token=…&amp;client=…（sublinkPro 风格）和 /sub/&lt;token&gt;?format=… 都可用；base64 版见控制台接口 /api/sub-link。</p>'
+  + '<p class="muted" id="shareInfo"></p>'
+  + '<button id="btnImport">一键导入 sing-box</button> <button class="ghost" id="btnRefresh">刷新流量</button> <button class="ghost" id="btnRotate">刷新订阅链接（旧链接立即失效）</button> <button class="ghost" id="btnDisable">停用订阅链接</button>'
+  + '<p class="muted" id="copyMsg"></p></div>'
+  + '<div class="card"><h2>节点 · 总流量（探针）</h2><p class="muted" id="probeNote"></p><table><thead><tr><th>节点</th><th>状态 / 实时</th><th>今日</th><th>本月已用 / 限额</th><th>CPU / 运行</th></tr></thead><tbody id="nodeRows"></tbody></table></div></div>'
+  + '</div><script>'
+  + 'var session=null,subUrls=null,importUrl="";'
+  + 'function copyText(t,msg){if(navigator.clipboard){navigator.clipboard.writeText(t).then(function(){document.getElementById("copyMsg").textContent=msg||"已复制。"})}else{document.getElementById("copyMsg").textContent=t}}'
+  + 'function fmt(n){if(n==null)return "-";var u=["B","KB","MB","GB","TB"],i=0;while(n>=1024&&i<u.length-1){n/=1024;i++}return n.toFixed(n>=100?0:1)+" "+u[i]}'
+  + 'function fmtSpeed(n){return fmt(n)+"/s"}'
+  + 'function esc(s){return String(s==null?"":s).replace(/&/g,"&amp;").replace(/</g,"&lt;")} '
+  + 'function showMsg(t){document.getElementById("loginMsg").textContent=t}'
+  + 'function setShareInfo(sh){if(!sh)return;document.getElementById("shareInfo").textContent="订阅链接：创建于 "+new Date(sh.created_at).toLocaleString()+(sh.expires_at?"，到期 "+new Date(sh.expires_at).toLocaleString():"，永不过期")+"，已访问 "+(sh.access_count||0)+" 次"+(sh.last_access_at?"，上次访问 "+new Date(sh.last_access_at).toLocaleString():"")}'
+  + 'async function doAuth(body){showMsg("核验中…");var r=await fetch("/api/auth",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});var j=await r.json();if(!j.ok){if(j.reason==="carrot<=500"){document.getElementById("gatedCard").classList.remove("hidden");document.getElementById("dash").classList.add("hidden");document.getElementById("gatedMsg").innerHTML="萝卜：<b>"+j.carrot+"</b>，还差 <b class=\\"bad\\">"+j.shortfall+"</b> 才到 501（&gt; 500）。";showMsg("未达标：萝卜 "+j.carrot+"，还差 "+j.shortfall+"。")}else{showMsg("登录失败：" + (j.error||"未知错误"))}return} session=j.session;subUrls=j.sub_urls||{singbox:j.sub_url,clash:j.sub_url,links:j.sub_url};importUrl=j.import_url;document.getElementById("gatedCard").classList.add("hidden");document.getElementById("dash").classList.remove("hidden");document.getElementById("who").textContent=j.user_id+(j.username?" ("+j.username+")":"");document.getElementById("carrotOut").textContent=j.carrot;document.getElementById("demoBadge").textContent=j.demo?"（演示模式）":"";document.getElementById("subSingbox").textContent=subUrls.singbox;document.getElementById("subClash").textContent=subUrls.clash;document.getElementById("subSurge").textContent=subUrls.surge||subUrls.c_surge||"";document.getElementById("subLinks").textContent=subUrls.links;setShareInfo(j.share);showMsg("已登录，萝卜 "+j.carrot+"。");loadNodes()}'
+  + 'async function loadNodes(){if(!session)return;var r=await fetch("/api/nodes",{headers:{"X-Session":session}});var j=await r.json();if(!j.ok){showMsg("拉取节点失败：" + (j.error||""));return} document.getElementById("probeNote").textContent="来源：" + j.probe_source + " · " + j.traffic_note;var html="";j.nodes.forEach(function(n){var pct=n.pct_used==null?"—":n.pct_used+"%";var bar=n.pct_used==null?"": "<div class=\\"bar\\"><i style=\\"width:"+Math.min(100,n.pct_used)+"%\\"></i></div>";var up=n.uptime==null?"—":Math.floor(n.uptime/86400)+" 天";html+="<tr><td><b>"+esc(n.name)+"</b><br><span class=\\"muted\\">"+esc(n.region)+" · 探针："+esc(n.probe_name)+" #"+n.probe_node_id+"</span></td><td><span class=\\"dot"+(n.online===true?"":" off")+"\\"></span> "+(n.online===true?"在线":n.online===false?"离线":"未知（不在探针里）")+"<br><span class=\\"muted\\">↑ "+fmtSpeed(n.net_tx)+" ↓ "+fmtSpeed(n.net_rx)+"</span></td><td>"+fmt(n.day_used)+"</td><td>"+fmt(n.month_used)+" / "+(n.traffic_limit?fmt(n.traffic_limit):"不限")+"<br><span class=\\"muted\\">已用 "+pct+" · 剩余 "+(n.remaining==null?"—":fmt(n.remaining))+"</span>"+bar+"</td><td>"+(n.cpu==null?"—":n.cpu.toFixed(1)+"%")+"<br><span class=\\"muted\\">"+up+"</span></td></tr>"});document.getElementById("nodeRows").innerHTML=html||"<tr><td colspan=\\"5\\">暂无节点</td></tr>"}'
+  + 'document.getElementById("btnToken").onclick=function(){var t=document.getElementById("token").value.trim();if(!t){showMsg("先粘贴 EMOS token");return}doAuth({token:t})};'
+  + 'document.getElementById("btnDemo").onclick=function(){doAuth({carrot:Number(document.getElementById("demoCarrot").value)})};'
+  + 'document.getElementById("btnDemo600").onclick=function(){document.getElementById("demoCarrot").value=600;doAuth({carrot:600})};'
+  + 'document.getElementById("btnDemo400").onclick=function(){document.getElementById("demoCarrot").value=400;doAuth({carrot:400})};'
+  + 'document.getElementById("btnCopySingbox").onclick=function(){if(subUrls)copyText(subUrls.singbox,"已复制 sing-box 订阅链接。")};'
+  + 'document.getElementById("btnCopyClash").onclick=function(){if(subUrls)copyText(subUrls.clash,"已复制 Clash 订阅链接。")};'
+  + 'document.getElementById("btnCopySurge").onclick=function(){if(subUrls)copyText(subUrls.surge||subUrls.c_surge||"","已复制 Surge 订阅链接。")};'
+  + 'document.getElementById("btnRotate").onclick=async function(){if(!session)return;var r=await fetch("/api/sub/refresh",{method:"POST",headers:{"X-Session":session}});var j=await r.json();if(!j.ok){showMsg("刷新失败：" + (j.error||""));return}subUrls=j.sub_urls;importUrl=j.import_url;document.getElementById("subSingbox").textContent=subUrls.singbox;document.getElementById("subClash").textContent=subUrls.clash;document.getElementById("subSurge").textContent=subUrls.surge||subUrls.c_surge||"";document.getElementById("subLinks").textContent=subUrls.links;setShareInfo(j.share);document.getElementById("copyMsg").textContent="已生成新订阅链接，旧链接立即失效，请重新导入。"};'
+  + 'document.getElementById("btnDisable").onclick=async function(){if(!session)return;if(!confirm("停用后订阅链接立即失效，重新登录才能恢复，确定？"))return;var r=await fetch("/api/sub/disable",{method:"POST",headers:{"X-Session":session}});var j=await r.json();if(j.ok){setShareInfo(j.share);document.getElementById("copyMsg").textContent="订阅链接已停用。"}};'
+  + 'document.getElementById("btnCopyLinks").onclick=function(){if(subUrls)copyText(subUrls.links,"已复制通用 hy2 订阅链接。")};'
+  + 'document.getElementById("btnImport").onclick=function(){if(importUrl)window.location.href=importUrl};'
+  + 'document.getElementById("btnRefresh").onclick=function(){loadNodes()};'
+  + 'setInterval(function(){if(session)loadNodes()},30000);'
+  + '</script></body></html>';
+
+const server = http.createServer(async (req, res) => {
+  try {
+    const u = new URL(req.url, 'http://localhost');
+    if (req.method === 'GET' && u.pathname === '/') {
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      return res.end(HTML);
+    }
+    if (req.method === 'GET' && u.pathname === '/health') return sendJson(res, 200, { ok: true, nodes: NODES.length });
+    if (req.method === 'GET' && u.pathname === '/admin') return handleAdminPage(req, res);
+    if (req.method === 'POST' && u.pathname === '/api/admin/login') return handleAdminLogin(req, res);
+    if (req.method === 'POST' && u.pathname === '/api/admin/logout') return handleAdminLogout(req, res);
+    if (u.pathname.startsWith('/api/admin/')) return handleAdminApi(req, res);
+    if (req.method === 'POST' && u.pathname === '/api/auth') return handleAuth(req, res);
+    if (req.method === 'GET' && u.pathname === '/api/nodes') return handleNodes(req, res);
+    if (req.method === 'GET' && u.pathname === '/api/sub-link') return handleSubLink(req, res);
+    if (req.method === 'POST' && u.pathname === '/api/sub/refresh') return handleSubRefresh(req, res);
+    if (req.method === 'POST' && u.pathname === '/api/sub/disable') return handleSubDisable(req, res);
+    if (req.method === 'GET' && u.pathname === '/c/') {
+      const token = u.searchParams.get('token');
+      if (!token) return sendJson(res, 400, { ok: false, error: 'missing ?token=' });
+      return serveSubscription(req, res, token);
+    }
+    if (req.method === 'GET' && u.pathname.startsWith('/sub/')) {
+      const token = decodeURIComponent(u.pathname.slice(5));
+      return handleSub(req, res, token);
+    }
+    return sendJson(res, 404, { ok: false, error: 'not found' });
+  } catch (e) {
+    console.error(e);
+    return sendJson(res, 500, { ok: false, error: e.message });
+  }
+});
+
+server.listen(PORT, () => {
+  console.log('emos-sub prototype listening on http://127.0.0.1:' + PORT);
+  console.log('nodes loaded: ' + NODES.map((n) => n.key + '->probe#' + n.probe_node_id).join(', '));
+});

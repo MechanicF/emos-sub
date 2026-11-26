@@ -1,0 +1,6 @@
+{
+  "carrot_threshold": 500,
+  "share_ttl_hours": 24,
+  "name_rule": "[$Flag] $LinkCountryName - $Name",
+  "probe_cache_seconds": 30
+}

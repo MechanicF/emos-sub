@@ -1,0 +1,20 @@
+{
+  "log": { "level": "info", "timestamp": true },
+  "dns": {
+    "servers": [
+      { "tag": "dns-remote", "address": "tls://8.8.8.8", "detour": "PROXY" },
+      { "tag": "dns-direct", "address": "223.5.5.5", "detour": "direct" }
+    ],
+    "rules": [{ "outbound": "any", "server": "dns-direct" }],
+    "final": "dns-remote", "strategy": "ipv4_only"
+  },
+  "inbounds": [{ "type": "mixed", "tag": "mixed-in", "listen": "127.0.0.1", "listen_port": 7890 }],
+  "outbounds": {{OUTBOUNDS}},
+  "route": {
+    "rules": [
+      { "protocol": "dns", "outbound": "dns-out" },
+      { "ip_is_private": true, "outbound": "direct" }
+    ],
+    "final": "PROXY", "auto_detect_interface": true
+  }
+}
