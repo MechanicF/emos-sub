@@ -143,13 +143,12 @@ const srv = spawnServer(REPO, PORT, {});
     if (consoleHtml.includes('探针：') || consoleHtml.includes('probeNote') || consoleHtml.includes('节点 · 总流量（探针）')) {
       fail('console still shows node descriptions or probe mapping');
     } else ok('console shows no node description or probe mapping');
-    // Total traffic stat = sum of the nodes' real monthly traffic; mobile
-    // card layout labels every cell and turns rows into cards. (The row
-    // builder emits data-label at runtime, so the served source carries the
-    // escaped form data-label=\"...\", not the plain-quote form.)
-    if (!consoleHtml.includes('statTotalTraffic') || !consoleHtml.includes('data-label=') || !consoleHtml.includes('.node-table')) {
-      fail('console missing total-traffic stat or mobile card layout');
-    } else ok('console has total-traffic stat and mobile card layout');
+    // The total-traffic stat card was removed from the console (v1.4.4):
+    // per-node traffic stays in the table, the aggregate is gone. Mobile
+    // card layout labels every cell and turns rows into cards.
+    if (consoleHtml.includes('statTotalTraffic') || !consoleHtml.includes('data-label=') || !consoleHtml.includes('.node-table')) {
+      fail('console still has total-traffic stat or lost mobile card layout');
+    } else ok('console has no total-traffic stat and keeps mobile card layout');
     // /api/nodes exposes expires_at (null for demo nodes without one).
     const nodesRes = JSON.parse((await reqRaw(PORT, 'GET', '/api/nodes', { 'X-Session': auth.session })).body);
     if (!nodesRes.ok || !Array.isArray(nodesRes.nodes) || !nodesRes.nodes.every((n) => 'expires_at' in n)) {

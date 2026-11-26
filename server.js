@@ -1,4 +1,4 @@
-// EMOS-gated sing-box gateway v1.4.3 — zero dependencies.
+// EMOS-gated sing-box gateway v1.4.4 — zero dependencies.
 // Node >= 18 (uses global fetch). Run: node server.js  (PORT env, default 3000)
 // Scope: EMOS login -> carrot > 500 -> console (nodes + per-user sub links)
 // + NODE TOTAL traffic only, from https://1e.lol/api/nodes. NO per-user traffic.
@@ -19,7 +19,7 @@ const path = require('path');
 const crypto = require('crypto');
 
 const PORT = parseInt(process.env.PORT || '3000', 10);
-const VERSION = '1.4.3';
+const VERSION = '1.4.4';
 const CONFIG_PATH = path.join(__dirname, 'config', 'nodes.json');
 const CLASH_TEMPLATE_PATH = path.join(__dirname, 'config', 'templates', 'clash.yaml');
 const SINGBOX_TEMPLATE_PATH = path.join(__dirname, 'config', 'templates', 'singbox.json');
@@ -1958,7 +1958,6 @@ code{word-break:break-all;background:rgba(0,0,0,.4);padding:2px 7px;border-radiu
 <div class="stats">
 <div class="stat"><div class="k">萝卜</div><div class="v" id="statCarrot">—</div><div class="s">门槛 &gt; 500</div></div>
 <div class="stat"><div class="k">节点</div><div class="v" id="statNodes">—</div><div class="s">订阅内容</div></div>
-<div class="stat"><div class="k">总流量</div><div class="v" id="statTotalTraffic">—</div><div class="s">本月合计</div></div>
 <div class="stat"><div class="k">订阅访问</div><div class="v" id="statAccess">—</div><div class="s">本条链接</div></div>
 </div>
 <div class="card"><h2>节点 · 总流量</h2><div class="table-scroll node-table"><table><thead><tr><th>节点</th><th>到期</th><th>状态</th><th>今日</th><th>本月已用 / 限额</th></tr></thead><tbody id="nodeRows"></tbody></table></div></div>
@@ -2019,9 +2018,6 @@ async function loadNodes(){
   var j=await r.json();
   if(!j.ok){showMsg("拉取节点失败：" + (j.error||""));return}
   document.getElementById("statNodes").textContent=j.nodes.length;
-  var anyTraffic=j.nodes.some(function(n){return typeof n.month_used==="number";});
-  var totalMonth=j.nodes.reduce(function(s,n){return s+(typeof n.month_used==="number"?n.month_used:0);},0);
-  document.getElementById("statTotalTraffic").textContent=anyTraffic?fmt(totalMonth):"—";
   var html="";
   j.nodes.forEach(function(n){
     var pct=n.pct_used==null?"—":n.pct_used+"%";
