@@ -1,4 +1,4 @@
-// EMOS-gated sing-box gateway v1.5.6 — zero dependencies.
+// EMOS-gated sing-box gateway v1.5.7 — zero dependencies.
 // Node >= 18 (uses global fetch). Run: node server.js  (PORT env, default 3000)
 // Scope: EMOS login -> carrot > 500 -> console (nodes + per-user sub links)
 // + NODE TOTAL traffic only, from https://1e.lol/api/nodes. NO per-user traffic.
@@ -25,7 +25,7 @@ const path = require('path');
 const crypto = require('crypto');
 
 const PORT = parseInt(process.env.PORT || '3000', 10);
-const VERSION = '1.5.6';
+const VERSION = '1.5.7';
 const CONFIG_PATH = path.join(__dirname, 'config', 'nodes.json');
 const CLASH_TEMPLATE_PATH = path.join(__dirname, 'config', 'templates', 'clash.yaml');
 const SINGBOX_TEMPLATE_PATH = path.join(__dirname, 'config', 'templates', 'singbox.json');
@@ -1830,9 +1830,9 @@ const UI_CSS = `:root{
 *{box-sizing:border-box}
 html,body{margin:0;padding:0}
 body{min-height:100vh;background:var(--bg);color:var(--text);font-family:var(--sans);font-size:14px;line-height:1.55;-webkit-font-smoothing:antialiased;font-variant-numeric:tabular-nums}
-body.narrow{min-height:auto}
+body.narrow{min-height:100vh;display:flex;align-items:center}
 .wrap{max-width:1440px;margin:0 auto;padding:24px 32px 64px}
-body.narrow .wrap{max-width:880px}
+body.narrow .wrap{max-width:880px;width:100%;padding-block:24px}
 .topbar{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:0 0 24px;padding:0 0 16px;border-bottom:1px solid var(--line)}
 .brand-mark{width:32px;height:32px;flex:none;display:flex;align-items:center;justify-content:center;border:1px solid var(--line);border-radius:8px;background:var(--surface);color:var(--accent)}
 .brand-mark svg{width:18px;height:18px}
@@ -1855,6 +1855,8 @@ button:active{transform:scale(.98)}
 button:focus-visible,input:focus-visible,textarea:focus-visible,a:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 button.ghost{background:var(--raised);border-color:var(--line);color:var(--text)}
 button.ghost:hover{background:var(--line-2);border-color:var(--line-2);color:var(--text)}
+.link-btn{background:none;border:0;color:var(--muted);padding:8px 4px}
+.link-btn:hover{background:none;color:var(--text);text-decoration:underline}
 button.danger{background:transparent;border-color:var(--negative);color:var(--negative)}
 button.danger:hover{background:var(--raised);color:var(--negative)}
 button.big{padding:12px 20px}
@@ -1877,15 +1879,21 @@ thead th{position:static;background:transparent;font-size:12px;font-weight:400;c
 th,td{text-align:left;padding:12px 16px;border-bottom:1px solid var(--line);vertical-align:middle}
 tbody tr:hover{background:var(--raised)}
 tbody tr:last-child td{border-bottom:0}
-td button{padding:8px 12px;font-size:12px;margin:0 4px 4px 0}
+td button{background:var(--raised);border:1px solid var(--line);color:var(--text);padding:8px 12px;font-size:12px;margin:0 4px 4px 0}
+td button:hover{background:var(--line-2);color:var(--text)}
+td button.danger{background:transparent;border-color:var(--negative);color:var(--negative)}
+td button.danger:hover{background:var(--raised);color:var(--negative)}
+td button[data-act="up"],td button[data-act="down"]{padding:8px;min-width:32px}
+td button svg{width:16px;height:16px;display:block;margin:0 auto}
 td button:last-child{margin-right:0}
 .pill{display:inline-flex;align-items:center;gap:8px;font-size:12px;font-weight:400;color:var(--text-2);background:none;border:0;border-radius:0;padding:0;white-space:nowrap}
+.tag{font-family:var(--mono);font-size:12px;color:var(--muted)}
 .pill::before{content:"";width:6px;height:6px;border-radius:50%;background:var(--muted);flex:none}
 .pill.ok::before{background:var(--positive)}
 .pill.bad::before{background:var(--negative)}
 .pill.warn::before{background:var(--warning)}
 .pill.accent::before{background:var(--accent)}
-.bar{height:4px;background:var(--raised);border-radius:2px;overflow:hidden;margin:8px 0 0}
+.bar{height:4px;width:60%;margin:8px 0 0 auto;background:var(--raised);border-radius:2px;overflow:hidden}
 .bar i{display:block;height:100%;background:var(--accent);border-radius:2px}
 .sub-row{display:flex;align-items:center;gap:12px;background:var(--raised);border:1px solid var(--line);border-radius:8px;padding:12px 16px;margin:12px 0}
 .sub-row::before{content:"";width:6px;height:6px;border-radius:50%;background:var(--accent);flex:none}
@@ -1926,6 +1934,9 @@ td button:last-child{margin-right:0}
 .tabs button.tab:hover{background:none;color:var(--text);transform:none}
 .tabs button.tab.active{background:none;color:var(--text);border-bottom-color:var(--accent)}
 .empty{padding:32px 16px;text-align:center;color:var(--muted);font-size:13px}
+.node-table th:nth-child(4),.node-table td:nth-child(4),.node-table th:nth-child(5),.node-table td:nth-child(5){text-align:right;font-family:var(--mono)}
+.shares-table th:nth-child(5),.shares-table td:nth-child(5){text-align:right;font-family:var(--mono)}
+#formTitle{margin-top:24px}
 @media (max-width:640px){
  .wrap{padding:16px 16px 48px}
  .card{padding:16px}
@@ -1938,7 +1949,7 @@ td button:last-child{margin-right:0}
  .node-table thead{display:none}
  .node-table table,.node-table tbody,.node-table tr,.node-table td{display:block;width:100%}
  .node-table tr{border:1px solid var(--line);border-radius:8px;padding:4px 12px;margin:12px 0;background:var(--surface)}
- .node-table td{border-bottom:1px solid var(--line);padding:10px 0}
+ .node-table td{border-bottom:1px solid var(--line);padding:10px 0;text-align:left}
  .node-table td:last-child{border-bottom:0}
  .node-table td[data-label]:not([data-label=""])::before{content:attr(data-label);display:block;font-size:11px;color:var(--muted);margin-bottom:4px}
  .sub-row{flex-wrap:wrap}
@@ -1986,7 +1997,7 @@ const ADMIN_HTML = `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8
 
 <div class="card panel hidden" data-panel="shares"><h2>分享链接</h2>
 <p class="muted">用户登录后自动创建，每人一条；Token 仅显示前 6 位。</p>
-<div class="table-scroll"><table><thead><tr><th>Token</th><th>用户</th><th>创建 / 到期</th><th>状态</th><th>访问</th><th>最后 IP / 访问</th><th>操作</th></tr></thead><tbody id="shareRows"></tbody></table></div>
+<div class="table-scroll shares-table"><table><thead><tr><th>Token</th><th>用户</th><th>创建 / 到期</th><th>状态</th><th>访问</th><th>最后 IP / 访问</th><th>操作</th></tr></thead><tbody id="shareRows"></tbody></table></div>
 <p class="actions"><button type="button" class="danger" id="btnRevokeAll">全部吊销</button></p><p id="shareMsg" class="msg"></p></div>
 
 <div class="card panel hidden" data-panel="settings"><h2>设置</h2>
@@ -2061,7 +2072,7 @@ async function loadNodes(){
   var h='';
   nodes.forEach(function(n,i){
     var probe=n.probe_node_id==null?'—':'#'+n.probe_node_id+' '+(n.online===true?'<span class="pill ok">在线</span>':n.online===false?'<span class="pill bad">离线</span>':'<span class="pill">不在探针里</span>');
-    h+='<tr><td><code>'+esc(n.key)+'</code></td><td><b>'+esc(n.name)+'</b><br><span class="muted">'+esc(n.region)+'</span></td><td>'+(n.expires_at?esc(n.expires_at):(n.expires_at_probe?esc(n.expires_at_probe)+' <span class="muted">探针</span>':'—'))+'</td><td><span class="pill">'+esc(n.protocol||'—')+'</span></td><td>'+esc(n.server||'—')+':'+(n.server_port==null?'—':n.server_port)+'<br><span class="muted">sni: '+esc(n.sni||'—')+'</span></td><td>'+probe+'</td><td><button type="button" data-act="edit" data-i="'+i+'">编辑</button> <button type="button" class="ghost" data-act="up" data-i="'+i+'">↑</button><button type="button" class="ghost" data-act="down" data-i="'+i+'">↓</button> <button type="button" class="danger" data-act="del" data-i="'+i+'">删除</button></td></tr>';
+    h+='<tr><td><code>'+esc(n.key)+'</code></td><td><b>'+esc(n.name)+'</b><br><span class="muted">'+esc(n.region)+'</span></td><td>'+(n.expires_at?esc(n.expires_at):(n.expires_at_probe?esc(n.expires_at_probe)+' <span class="muted">探针</span>':'—'))+'</td><td><span class="tag">'+esc(n.protocol||'—')+'</span></td><td>'+esc(n.server||'—')+':'+(n.server_port==null?'—':n.server_port)+'<br><span class="muted">sni: '+esc(n.sni||'—')+'</span></td><td>'+probe+'</td><td><button type="button" data-act="edit" data-i="'+i+'">编辑</button> <button type="button" class="ghost" data-act="up" data-i="'+i+'"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="m6 15 6-6 6 6"/></svg></button><button type="button" class="ghost" data-act="down" data-i="'+i+'"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg></button> <button type="button" class="danger" data-act="del" data-i="'+i+'">删除</button></td></tr>';
   });
   document.getElementById('nodeRows').innerHTML=h||'<tr><td colspan="7"><div class="empty">暂无节点 · 在下方添加第一条</div></td></tr>';
   return true;
@@ -2207,7 +2218,7 @@ const HTML = `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><met
 <div class="sub-row"><span class="lbl">订阅地址</span><code id="subAuto"></code><button type="button" id="btnCopyAuto">复制</button></div>
 <p class="muted">一条链接全客户端通用，服务端按客户端自动识别格式（FlClash / Clash Verge 返回 Clash，sing-box / Hiddify / Karing 返回 JSON，Surge 返回 Surge 配置，Shadowrocket、Loon 等返回通用链接列表）。</p>
 <p class="muted" id="shareInfo"></p>
-<div class="actions"><button type="button" id="btnImport">一键导入</button> <button type="button" class="ghost" id="btnRefresh">刷新流量</button> <button type="button" class="ghost" id="btnRotate">轮换链接</button> <button type="button" class="ghost" id="btnDisable">停用链接</button> <button type="button" class="ghost" id="btnLogout">退出登录</button></div>
+<div class="actions"><button type="button" id="btnImport">一键导入</button> <button type="button" class="ghost" id="btnRefresh">刷新流量</button> <button type="button" class="ghost" id="btnRotate">轮换链接</button> <button type="button" class="danger" id="btnDisable">停用链接</button> <button type="button" class="link-btn" id="btnLogout">退出登录</button></div>
 <p class="muted" id="copyMsg"></p></div>
 </div>
 </div>
@@ -2266,7 +2277,7 @@ async function loadNodes(){
   var html="";
   j.nodes.forEach(function(n){
     var pct=n.pct_used==null?"—":n.pct_used+"%";
-    var bar=n.pct_used==null?"":"<div class=\\"bar\\"><i style=\\"width:"+Math.min(100,n.pct_used)+"\\"></i></div>";
+    var bar=n.pct_used==null?"":"<div class=\\"bar\\"><i style=\\"width:"+Math.min(100,n.pct_used)+"%\\"></i></div>";
     var pill=n.online===true?'<span class="pill ok">在线</span>':n.online===false?'<span class="pill bad">离线</span>':'<span class="pill">未知 · 不在探针里</span>';
     html+="<tr><td data-label=\\"\\"><b>"+esc(n.name)+"</b></td><td data-label=\\"到期\\">"+fmtExpiry(n.expires_at)+"</td><td data-label=\\"状态\\">"+pill+"</td><td data-label=\\"今日\\">"+fmt(n.day_used)+"</td><td data-label=\\"本月已用 / 限额\\">"+fmt(n.month_used)+" / "+(n.traffic_limit?fmt(n.traffic_limit):"不限")+"<br><span class=\\"muted\\">已用 "+pct+" · 剩余 "+(n.remaining==null?"—":fmt(n.remaining))+"</span>"+bar+"</td></tr>";
   });
