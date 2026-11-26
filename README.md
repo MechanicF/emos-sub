@@ -2,7 +2,7 @@
 
 EMOS 登录核验萝卜余额，超过 500 才能进入控制台、领取专属订阅链接。节点流量取自 1e.lol 探针的整机总流量，不做每人用量统计。
 
-当前版本：**v1.3.2**（2026-11-26）
+当前版本：**v1.4.0**（2026-11-26）
 
 零依赖 Node.js（Node ≥ 18），不用 `npm install`。
 
@@ -25,7 +25,7 @@ PORT=3000 ADMIN_TOKEN=你的口令 node server.js
 ```bash
 cd emos-sub            # 或安装目录 /opt/emos-sub
 ./manage.sh update     # 备份配置 → 拉取最新代码 → 重启
-./manage.sh status     # 查看程序版本（v1.3.2）、git 提交、运行状态、端口、健康检查
+./manage.sh status     # 查看程序版本（v1.4.0）、git 提交、运行状态、端口、健康检查
 ```
 
 `update` 只更新代码文件（`server.js`、`manage.sh`、`start.sh`、模板），`.env` 和 `config/`（节点、设置）原样保留，更新前自动备份到 `backups/`。
@@ -126,7 +126,34 @@ curl -fsSL https://raw.githubusercontent.com/MechanicF/emos-sub/main/manage.sh -
 - `GET /health` → `{ok, version, nodes}`
 - 后台：`POST /api/admin/login`、`POST /api/admin/logout`、`GET /api/admin/health`、`GET|POST|PUT|DELETE /api/admin/nodes`（含 `/parse`、`/reorder`）、`GET /api/admin/shares`（刷新/停用/启用/吊销/全部吊销）、`GET|PUT /api/admin/settings`
 
+## 安全说明（防破解）
+
+- **后台口令防爆破**：同一 IP 连续 5 次输错口令后锁定 15 分钟（第 6 次起返回 429），输对一次清零。口令比较用 `timingSafeEqual`（登录接口和 `X-Admin-Token` 头都一样），不怕计时攻击。口令建议只用字母数字。
+- **登录/订阅限流**：`/api/auth` 和 EMOS 跳转每 IP 10 分钟 30 次（每次登录要调两次 EMOS 接口，不限流会被当成 EMOS 查询代理）；订阅端点 `/c/`、`/sub/` 每 IP 每分钟 120 次。订阅 token 本身是 128 位随机数，猜不出来。
+- **萝卜掉下去立即吊销**：订阅每次取用时最多 10 分钟核验一次萝卜；一旦核验发现萝卜 ≤ 500（或 EMOS token 失效 401/403），整个会话和订阅链接当场删除，用户必须重新登录。EMOS 临时挂掉（网络错误/5xx）时不断订阅，只推迟 60 秒再核验。
+- **重复登录吊销旧会话**：每人同时只留一个有效登录，新登录会把旧会话和旧订阅链接一起废掉（“每人一条订阅链接”就是这么保证的）。
+- **刷新订阅也要重新核验**：`/api/sub/refresh` 在核验窗口过期时会先查一次萝卜，萝卜不够或 token 失效就拒绝；所以“停用/吊销”不是摆设，绕不过刷新。
+- **后台“停用/吊销”不是封号**：它只杀掉当前这条链接；只要用户萝卜还 > 500，重新登录就能拿到新链接。想彻底不让某人用，只能把他萝卜门槛之外的资格断掉（EMOS 侧）或改门槛。
+- **防崩溃**：请求处理全是 `await` 的，任何一个请求出错都只返回 500，不会打崩整个进程；畸形 cookie、坏订阅模板、Host 注入都经过回归测试验证（`test/check-pages.js`）。
+- **Cookie**：`emos_session` / `admin_session` 都是 HttpOnly + SameSite=Lax；公开地址是 https 时自动加 Secure。当前 IP 直连 http 的部署没有 Secure 可加，上域名 + HTTPS 后自动生效。
+- **安全头**：所有响应带 `X-Content-Type-Options: nosniff`、`Referrer-Policy: no-referrer`，HTML 页面另带 `X-Frame-Options: DENY`（防点击劫持）。
+- **会话清扫**：过期会话/分享/后台会话每小时清扫一次，不会一直占内存；待处理的 EMOS 登录 uuid 最多留 1000 条。
+- **Host 头校验**：Host 只允许域名/端口字符，拼不出订阅链接里的注入；订阅说明页的转义也覆盖了引号。
+- **节点名/密码里的 `$`**：命名规则和订阅模板的占位替换都用函数式替换，名字或密码里有 `$&`、`$$` 等也不会串改内容（以前会把 `$&` 换成占位符本身，悄悄改坏名字和密码）。
+
 ## 版本历史
+
+### v1.4.0 — 2026-11-26（全量复核 + 防破解）
+
+- **修了两个会打崩服务的 bug**：请求处理漏了 `await`，任何异步错误都变成未处理异常直接杀进程（畸形 cookie、坏模板都已实测打崩过）；现已全量 `await` + 兜底日志，单请求出错只返回 500
+- **修了门禁绕过**：萝卜掉下 500 后，旧代码因先更新核验时间再判断，白送 10 分钟订阅；现在核验失败当场删除会话和分享，且刷新订阅也要重新核验
+- **重复登录吊销旧会话**：每人只留一个有效登录和一条订阅链接
+- **限流**：后台登录 5 次失败锁 IP 15 分钟；`/api/auth`、EMOS 跳转、订阅端点按 IP 限流
+- **修了月末 expire 算错**：服务器时区是 UTC 时，每月 30/31 号 16:30 UTC 之后 expire 会算成已过去的月底；现按上海时间算
+- **修了订阅模板 `$` 注入**：节点名/密码含 `$&` 会被模板占位替换串改（实测 `A$&B` 变成了 `A{{PROXIES}}B`）；命名规则和模板替换全部改函数式
+- 探针挂掉时加负缓存（不再每次请求等满 10 秒超时）；`/c` 不带斜杠也能用；端口校验（0 和 >65535 的链接直接拒绝）；REALITY 没 pbk 的链接解析时拒绝（以前静默降级成普通 TLS）；畸形 cookie 跳过不报错；超大请求体直接拒绝；Host 非法字符回退到本机地址
+- `manage.sh`：systemd 服务改用 node 绝对路径（nvm 装的 node 以前找不到）；备份只留最近 10 个；`.env` 写值加引号（口令含空格/`$`/引号不再写坏）；`update` 也更新 `test/`
+- 测试：`test/check-pages.js` 增加单元测试（月末 expire、端口、REALITY）和回归测试（mock EMOS 吊销流程、限流、崩溃抵抗、Host 注入、`$` 名字），共 35 项全过；`EMOS_BASE` / `CARROT_RECHECK_MS` 可用环境变量覆盖，方便测试
 
 ### v1.3.2 — 2026-11-26
 

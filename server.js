@@ -1,4 +1,4 @@
-// EMOS-gated sing-box gateway v1.3.2 — zero dependencies.
+// EMOS-gated sing-box gateway v1.4.0 — zero dependencies.
 // Node >= 18 (uses global fetch). Run: node server.js  (PORT env, default 3000)
 // Scope: EMOS login -> carrot > 500 -> console (nodes + per-user sub links)
 // + NODE TOTAL traffic only, from https://1e.lol/api/nodes. NO per-user traffic.
@@ -9,19 +9,24 @@
 // Protocols: hy2://, hysteria2:// and vless:// (incl. REALITY + VLESS Encryption).
 'use strict';
 const http = require('http');
+// Last-resort nets (2026-11-26 audit): the dispatcher awaits every handler,
+// so request errors are caught there. These two only guard against a bug
+// that slips past that — log loudly, keep serving, never die on one request.
+process.on('unhandledRejection', (e) => { console.error('UNHANDLED REJECTION (kept running):', e); });
+process.on('uncaughtException', (e) => { console.error('UNCAUGHT EXCEPTION (kept running):', e); });
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
 const PORT = parseInt(process.env.PORT || '3000', 10);
-const VERSION = '1.3.2';
+const VERSION = '1.4.0';
 const CONFIG_PATH = path.join(__dirname, 'config', 'nodes.json');
 const CLASH_TEMPLATE_PATH = path.join(__dirname, 'config', 'templates', 'clash.yaml');
 const SINGBOX_TEMPLATE_PATH = path.join(__dirname, 'config', 'templates', 'singbox.json');
 const PROBE_URL = 'https://1e.lol/api/nodes';
-const EMOS_BASE = 'https://emos.best';
+const EMOS_BASE = process.env.EMOS_BASE || 'https://emos.best';
 const SESSION_TTL_MS = 24 * 60 * 60 * 1000;
-const CARROT_RECHECK_MS = 10 * 60 * 1000;
+const CARROT_RECHECK_MS = Math.max(1000, parseInt(process.env.CARROT_RECHECK_MS || '600000', 10) || 600000);
 // Runtime settings (mutable — admin can change them without a restart).
 // Precedence at startup: env var > config/settings.json > default.
 // CARROT_THRESHOLD: strict, carrot must be > this. SHARE_TTL_HOURS: 0 = never.
@@ -130,16 +135,68 @@ function clientIp(req) {
   return (req.socket && req.socket.remoteAddress) || null;
 }
 
+// --- rate limiting (anti brute-force / anti abuse) -----------------------
+// Generic per-key counter in a sliding window. Admin login counts FAILURES
+// only: 5 wrong guesses lock that IP for 15 min; a correct login clears it.
+// Windows are env-overridable so the regression test can use short ones.
+const rateLimits = new Map(); // key -> {count, resetAt}
+function rateLimitHit(key, max, windowMs) {
+  const now = Date.now();
+  let e = rateLimits.get(key);
+  if (!e || now > e.resetAt) { e = { count: 0, resetAt: now + windowMs }; rateLimits.set(key, e); }
+  e.count += 1;
+  return e.count <= max;
+}
+function rateLimitCheck(req, res, key, max, windowMs) {
+  if (rateLimitHit(key, max, windowMs)) return true;
+  sendJson(res, 429, { ok: false, error: 'too many requests, try again later' });
+  return false;
+}
+const ADMIN_LOGIN_MAX_FAILS = parseInt(process.env.ADMIN_LOGIN_MAX_FAILS || '5', 10) || 5;
+const ADMIN_LOGIN_LOCK_MS = parseInt(process.env.ADMIN_LOGIN_LOCK_MS || String(15 * 60 * 1000), 10) || 15 * 60 * 1000;
+const adminLoginFails = new Map(); // ip -> {count, firstAt}
+function adminLoginBlocked(ip) {
+  const e = adminLoginFails.get(ip);
+  return !!e && e.count >= ADMIN_LOGIN_MAX_FAILS && Date.now() - e.firstAt < ADMIN_LOGIN_LOCK_MS;
+}
+function adminLoginFail(ip) {
+  const now = Date.now();
+  const e = adminLoginFails.get(ip);
+  if (!e || now - e.firstAt > ADMIN_LOGIN_LOCK_MS) adminLoginFails.set(ip, { count: 1, firstAt: now });
+  else e.count += 1;
+}
+// Hourly sweep: expired sessions/shares/admin sessions used to be deleted
+// only on access, so a session that is never used again sat in memory
+// forever (slow memory leak + stale shares pointing at dead sessions).
+setInterval(() => {
+  const now = Date.now();
+  for (const [sid, s] of sessions) {
+    if (now > s.expiresAt) { sessions.delete(sid); if (s.shareToken) shares.delete(s.shareToken); }
+  }
+  for (const [tok, s] of shares) {
+    if ((s.expires_at && now > s.expires_at) || !sessions.has(s.sessionId)) shares.delete(tok);
+  }
+  for (const [sid, s] of adminSessions) if (now > s.expiresAt) adminSessions.delete(sid);
+  for (const [k, v] of rateLimits) if (now > v.resetAt) rateLimits.delete(k);
+  prunePendingEmosLogins();
+}, 60 * 60 * 1000).unref();
+
 function randHex(n) { return crypto.randomBytes(n).toString('hex'); }
+// Security headers on every response: no MIME sniffing (a subscription
+// body must never be executed as script), no Referer leakage of token
+// URLs, no framing (the console/admin have state-changing buttons).
+function securityHeaders() {
+  return { 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer', 'X-Frame-Options': 'DENY' };
+}
 function sendJson(res, code, obj) {
   const body = JSON.stringify(obj);
-  res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+  res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', ...securityHeaders() });
   res.end(body);
 }
 function readBody(req) {
   return new Promise((resolve, reject) => {
     let data = '';
-    req.on('data', (c) => { data += c; if (data.length > 65536) req.destroy(); });
+    req.on('data', (c) => { data += c; if (data.length > 65536) { req.destroy(); reject(new Error('request body too large')); } });
     req.on('end', () => {
       if (!data) return resolve({});
       try { resolve(JSON.parse(data)); } catch (e) { reject(new Error('invalid JSON')); }
@@ -182,7 +239,10 @@ function parseCookies(req) {
   if (!h) return out;
   h.split(';').forEach((part) => {
     const i = part.indexOf('=');
-    if (i > 0) out[part.slice(0, i).trim()] = decodeURIComponent(part.slice(i + 1).trim());
+    if (i > 0) {
+      try { out[part.slice(0, i).trim()] = decodeURIComponent(part.slice(i + 1).trim()); }
+      catch (e) { /* malformed cookie value (e.g. %ZZ): skip that cookie */ }
+    }
   });
   return out;
 }
@@ -190,7 +250,8 @@ function getAdminSession(req) {
   if (!ADMIN_TOKEN) return null;
   const header = req.headers['x-admin-token'];
   if (typeof header === 'string' && header) {
-    if (header === ADMIN_TOKEN) return { via: 'header-token' };
+    const hb = Buffer.from(header), ab = Buffer.from(ADMIN_TOKEN);
+    if (hb.length === ab.length && crypto.timingSafeEqual(hb, ab)) return { via: 'header-token' };
     const s = adminSessions.get(header);
     if (s && Date.now() < s.expiresAt) return { via: 'header-session', id: header };
     if (s) adminSessions.delete(header);
@@ -309,6 +370,7 @@ function parseHy2(link, fallbackName) {
     const password = decodeURIComponent(rawUserinfo);
     if (!password || !u.hostname) return null;
     const port = parseInt(u.port || '443', 10);
+    if (!Number.isInteger(port) || port < 1 || port > 65535) return null;
     const params = u.searchParams;
     const sni = params.get('sni') || u.hostname;
     const insecure = params.get('insecure') === '1' || params.get('insecure') === 'true';
@@ -352,6 +414,7 @@ function parseVless(link, fallbackName) {
     const uuid = decodeURIComponent(u.username);
     if (!uuid || !u.hostname) return null;
     const port = parseInt(u.port || '443', 10);
+    if (!Number.isInteger(port) || port < 1 || port > 65535) return null;
     const p = u.searchParams;
     const rawSupport = p.get('support-x25519mlkem768');
     let support;
@@ -359,6 +422,7 @@ function parseVless(link, fallbackName) {
     else if (rawSupport === 'false' || rawSupport === '0') support = false;
     // any other value: leave undefined (do not guess)
     const security = (p.get('security') || 'none').toLowerCase();
+    if (security === 'reality' && !p.get('pbk')) return null; // REALITY needs pbk; without it the config silently degrades to plain TLS
     const name = decodeURIComponent(u.hash ? u.hash.slice(1) : '') || fallbackName;
     return {
       type: 'vless', tag: name, server: u.hostname, server_port: port,
@@ -439,21 +503,21 @@ function displayNames() {
       return (name + (dup ? ' ' + dup : '')).replace(/\s+/g, ' ').trim();
     }
     const base = NAME_RULE
-      .replace(/\$DuplicateIndex/g, '')
-      .replace(/\$Flag/g, flagEmoji(cc))
-      .replace(/\$LinkCountryName/g, COUNTRY_NAMES[cc] || cc)
-      .replace(/\$Name/g, name)
-      .replace(/\$Protocol/g, proto)
-      .replace(/\$Index/g, String(idx));
+      .replace(/\$DuplicateIndex/g, () => '')
+      .replace(/\$Flag/g, () => flagEmoji(cc))
+      .replace(/\$LinkCountryName/g, () => COUNTRY_NAMES[cc] || cc)
+      .replace(/\$Name/g, () => name)
+      .replace(/\$Protocol/g, () => proto)
+      .replace(/\$Index/g, () => String(idx));
     const dup = seen.get(base) || 0;
     seen.set(base, dup + 1);
     const tag = NAME_RULE
-      .replace(/\$DuplicateIndex/g, String(dup))
-      .replace(/\$Flag/g, flagEmoji(cc))
-      .replace(/\$LinkCountryName/g, COUNTRY_NAMES[cc] || cc)
-      .replace(/\$Name/g, name)
-      .replace(/\$Protocol/g, proto)
-      .replace(/\$Index/g, String(idx))
+      .replace(/\$DuplicateIndex/g, () => String(dup))
+      .replace(/\$Flag/g, () => flagEmoji(cc))
+      .replace(/\$LinkCountryName/g, () => COUNTRY_NAMES[cc] || cc)
+      .replace(/\$Name/g, () => name)
+      .replace(/\$Protocol/g, () => proto)
+      .replace(/\$Index/g, () => String(idx))
       .replace(/\s+/g, ' ').trim();
     return tag;
   });
@@ -541,9 +605,9 @@ function buildSingBoxConfig() {
     { type: 'dns', tag: 'dns-out' },
   ];
   const rendered = SINGBOX_TEMPLATE
-    .replace('{{OUTBOUNDS}}', JSON.stringify(full, null, 2))
-    .replace('{{PROXY_TAGS_JSON}}', JSON.stringify(tags))
-    .replace('{{DEFAULT_TAG}}', JSON.stringify(first));
+    .replace('{{OUTBOUNDS}}', () => JSON.stringify(full, null, 2))
+    .replace('{{PROXY_TAGS_JSON}}', () => JSON.stringify(tags))
+    .replace('{{DEFAULT_TAG}}', () => JSON.stringify(first));
   return JSON.parse(rendered);
 }
 
@@ -684,10 +748,10 @@ function buildClashYaml() {
   ruleLines.push('  - GEOIP,CN,🎯 全球直连,no-resolve');
   ruleLines.push('  - MATCH,🐟 漏网之鱼');
   return CLASH_TEMPLATE
-    .replace('{{PROXIES}}', proxyLines.join('\n'))
-    .replace('{{GROUPS}}', groupLines.join('\n'))
-    .replace('{{RULE_PROVIDERS}}', providerLines.join('\n'))
-    .replace('{{RULES}}', ruleLines.join('\n'));
+    .replace('{{PROXIES}}', () => proxyLines.join('\n'))
+    .replace('{{GROUPS}}', () => groupLines.join('\n'))
+    .replace('{{RULE_PROVIDERS}}', () => providerLines.join('\n'))
+    .replace('{{RULES}}', () => ruleLines.join('\n'));
 }
 
 function buildLinksText() {
@@ -826,12 +890,18 @@ function probeTotals(probeNodes) {
     download += p.month_rx || 0;
     if (p.traffic_limit) total += p.traffic_limit;
   }
-  const now = new Date();
-  // End of this month, 23:59:59 Asia/Shanghai (UTC+8, no DST) — not server-local time.
-  const expire = Date.UTC(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59) - 8 * 3600 * 1000;
-  return { upload, download, total, expire: Math.floor(expire / 1000) };
+  return { upload, download, total, expire: Math.floor(monthEndExpireMs(Date.now()) / 1000) };
 }
 
+// Subscription-Userinfo expire: last day of the CURRENT month in
+// Asia/Shanghai, 23:59:59. Computed in UTC+8 explicitly — the server's local
+// timezone may be UTC, where "this month" can lag Shanghai across the month
+// boundary (e.g. Nov 30 16:30 UTC is already Dec 1 in Shanghai; the old
+// local-time formula then returned an expire IN THE PAST for ~8h/month).
+function monthEndExpireMs(nowMs) {
+  const sh = new Date(nowMs + 8 * 3600 * 1000);
+  return Date.UTC(sh.getUTCFullYear(), sh.getUTCMonth() + 1, 0, 23, 59, 59) - 8 * 3600 * 1000;
+}
 function userinfoHeader(t) {
   const parts = ['upload=' + t.upload, 'download=' + t.download];
   if (t.total > 0) parts.push('total=' + t.total);
@@ -854,8 +924,11 @@ async function fetchProbe() {
   } catch (e) {
     console.error('Probe fetch failed, using labelled sample fallback:', e.message);
     // Keep any stale live cache if we have it; otherwise sample (labelled).
+    // Cache the failure too: without this, every request paid the full 10 s
+    // fetch timeout while the probe was down.
     if (probeCache.data) return { ...probeCache, source: 'live-stale' };
-    return { at: now, data: SAMPLE_PROBE, source: 'sample-fallback' };
+    probeCache = { at: now, data: SAMPLE_PROBE, source: 'sample-fallback' };
+    return probeCache;
   }
 }
 
@@ -941,13 +1014,25 @@ if (PUBLIC_URL && !/^https?:\/\/[^/]+$/.test(PUBLIC_URL)) {
 }
 const EMOS_LOGIN_TTL_MS = 10 * 60 * 1000;
 const pendingEmosLogins = new Map(); // uuid -> {createdAt}; consume-once, 10 min
+// Host allow-list for building URLs: only hostname/port characters.
+// A crafted Host (e.g. x" onclick="...) used to flow into the chooser page's
+// href and into Surge managed-config lines. Anything else falls back to
+// localhost so a bad Host can never produce a malicious URL.
+function validHost(h) {
+  return typeof h === 'string' && h.length > 0 && h.length <= 253 && /^[A-Za-z0-9._:\[\]-]+$/.test(h);
+}
 function publicBaseUrl(req) {
   if (PUBLIC_URL) return PUBLIC_URL;
   // x-forwarded-proto may be a comma list ("https, http") — take the first.
   const xf = (req.headers['x-forwarded-proto'] || '').split(',')[0].trim();
   const proto = xf || (req.socket && req.socket.encrypted ? 'https' : 'http');
-  return proto + '://' + req.headers.host;
+  const host = validHost(req.headers.host) ? req.headers.host : ('127.0.0.1:' + PORT);
+  return proto + '://' + host;
 }
+// Session cookies get Secure when the public base is https (Simon runs
+// plain http on the VPS IP today, so this is a no-op until he puts a
+// domain + HTTPS in front — then it turns on automatically).
+function cookieSecure(req) { return publicBaseUrl(req).startsWith('https://') ? '; Secure' : ''; }
 function prunePendingEmosLogins() {
   const now = Date.now();
   for (const [k, v] of pendingEmosLogins) {
@@ -958,6 +1043,9 @@ function buildEmosLoginUrl(req) {
   prunePendingEmosLogins();
   const uuid = crypto.randomUUID();
   pendingEmosLogins.set(uuid, { createdAt: Date.now() });
+  // Cap the table: without this, spamming /auth/emos grows the Map
+  // unboundedly (each entry lives 10 min). Oldest goes first.
+  while (pendingEmosLogins.size > 1000) pendingEmosLogins.delete(pendingEmosLogins.keys().next().value);
   const callback = publicBaseUrl(req) + '/auth/emos/callback';
   const login_url = EMOS_BASE + '/link?uuid=' + encodeURIComponent(uuid)
     + '&name=' + encodeURIComponent(EMOS_APP_NAME)
@@ -985,6 +1073,12 @@ async function emosSignCheck(token) {
 // Shared by POST /api/auth (manual token / demo) and the /link callback —
 // do not duplicate this logic. Never logs or renders the EMOS token.
 function issueUserSession(req, result, token, demo) {
+  // One live session per user_id: a fresh login revokes the previous one
+  // (and its subscription link). Before this, every re-login minted an
+  // extra permanently-valid link, so "one link per person" was not true.
+  for (const [sid, s] of sessions) {
+    if (s.user_id === result.user_id) { sessions.delete(sid); if (s.shareToken) shares.delete(s.shareToken); }
+  }
   const sessionId = randHex(16);
   const now = Date.now();
   const share = createShare(sessionId, result.user_id);
@@ -996,6 +1090,9 @@ function issueUserSession(req, result, token, demo) {
 
 // --- handlers ------------------------------------------------------------
 async function handleAuth(req, res) {
+  // Each attempt costs two EMOS API calls: cap it so the gateway cannot be
+  // used as an EMOS-check oracle or a DDoS amplifier.
+  if (!rateLimitCheck(req, res, 'auth:' + clientIp(req), 30, 10 * 60 * 1000)) return;
   let body;
   try { body = await readBody(req); } catch (e) { return sendJson(res, 400, { ok: false, error: e.message }); }
   const token = typeof body.token === 'string' ? body.token.trim() : '';
@@ -1031,12 +1128,14 @@ async function handleAuth(req, res) {
 // 302 the browser to EMOS. No popup, plain top-level navigation, exactly
 // like the emos_music reference client.
 function handleEmosLogin(req, res) {
+  if (!rateLimitCheck(req, res, 'emos-login:' + clientIp(req), 30, 10 * 60 * 1000)) return;
   const { login_url } = buildEmosLoginUrl(req);
   res.writeHead(302, { Location: login_url, 'Cache-Control': 'no-store' });
   return res.end();
 }
 // GET /api/auth/emos/login-url — same URL as JSON (testing / debugging).
 function handleEmosLoginUrl(req, res) {
+  if (!rateLimitCheck(req, res, 'emos-login:' + clientIp(req), 30, 10 * 60 * 1000)) return;
   const { login_url, callback } = buildEmosLoginUrl(req);
   return sendJson(res, 200, { ok: true, login_url, callback, app_name: EMOS_APP_NAME });
 }
@@ -1078,7 +1177,7 @@ async function handleEmosCallback(req, res) {
   const issued = issueUserSession(req, result, token, false);
   res.writeHead(302, {
     Location: '/',
-    'Set-Cookie': 'emos_session=' + issued.sessionId + '; HttpOnly; Path=/; Max-Age=86400; SameSite=Lax',
+    'Set-Cookie': 'emos_session=' + issued.sessionId + '; HttpOnly; Path=/; Max-Age=86400; SameSite=Lax' + cookieSecure(req),
     'Cache-Control': 'no-store',
   });
   return res.end();
@@ -1106,19 +1205,28 @@ function handleSubLink(req, res) {
 function handleLogout(req, res) {
   const s = getSession(req);
   if (s) { sessions.delete(s.sid); if (s.shareToken) shares.delete(s.shareToken); }
-  res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Set-Cookie': 'emos_session=; HttpOnly; Path=/; Max-Age=0; SameSite=Lax' });
+  res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Set-Cookie': 'emos_session=; HttpOnly; Path=/; Max-Age=0; SameSite=Lax' + cookieSecure(req) });
   return res.end(JSON.stringify({ ok: true }));
 }
 
 // POST /api/sub/refresh — rotate the share token; the old token 403s immediately.
-function handleSubRefresh(req, res) {
+async function handleSubRefresh(req, res) {
   const s = getSession(req);
   if (!s) return sendJson(res, 401, { ok: false, error: 'missing or expired X-Session — login first' });
+  const sess = sessions.get(s.sid);
+  if (!sess) return sendJson(res, 401, { ok: false, error: 'missing or expired X-Session — login first' });
+  // Rotating must not bypass the gate: an admin-disabled share, or a carrot
+  // that dropped since login, must not mint a fresh link without a live
+  // EMOS check. (Re-login does the same check; refresh is no cheaper.)
+  if (sess.emosToken && Date.now() - sess.lastCarrotCheck > CARROT_RECHECK_MS) {
+    const verdict = await recheckCarrot(s.sid, sess);
+    if (verdict === 'revoked') return sendJson(res, 403, { ok: false, error: 'carrot dropped below 500 (or EMOS token invalid) — please log in again' });
+    if (!sessions.get(s.sid)) return sendJson(res, 401, { ok: false, error: 'session ended — please log in again' });
+  }
   const old = shares.get(s.shareToken);
   if (old) { old.enabled = false; shares.delete(s.shareToken); }
   const share = createShare(s.sid, s.user_id);
-  const sess = sessions.get(s.sid);
-  if (sess) sess.shareToken = share.token;
+  sess.shareToken = share.token;
   const urls = subUrls(req, share.token);
   return sendJson(res, 200, { ok: true, user_id: s.user_id, sub_token: share.token, sub_url: urls.url, sub_urls: urls, import_url: urls.import_url, share: shareInfo(share) });
 }
@@ -1133,6 +1241,38 @@ function handleSubDisable(req, res) {
   return sendJson(res, 200, { ok: true, user_id: s.user_id, disabled: true, share: shareInfo(share) });
 }
 
+// Carrot re-check for a live session. Returns:
+//   'ok'      — EMOS confirms carrot still > threshold (fresh for 10 min)
+//   'revoked' — carrot dropped, or the EMOS token is dead (401/403):
+//               the whole session + share are deleted, caller must 403.
+//   'stale'   — EMOS unreachable / 5xx this time: serve this one request,
+//               retry soon (60 s) instead of failing every subscription
+//               fetch for the whole EMOS outage.
+// (2026-11-26 audit) The old code set lastCarrotCheck BEFORE the threshold
+// test, so one failed re-check granted 10 more minutes of free serving.
+async function recheckCarrot(sid, sess) {
+  try {
+    const r = await emosCheck(sess.emosToken);
+    sess.carrot = r.carrot;
+    if (!(r.carrot > CARROT_THRESHOLD)) {
+      sessions.delete(sid);
+      if (sess.shareToken) shares.delete(sess.shareToken);
+      return 'revoked';
+    }
+    sess.lastCarrotCheck = Date.now();
+    return 'ok';
+  } catch (e) {
+    if (/HTTP 40[13]/.test(e.message || '')) {
+      sessions.delete(sid);
+      if (sess.shareToken) shares.delete(sess.shareToken);
+      return 'revoked';
+    }
+    console.error('Carrot re-check failed (transient, retry in 60s):', e.message);
+    sess.lastCarrotCheck = Date.now() - CARROT_RECHECK_MS + 60 * 1000;
+    return 'stale';
+  }
+}
+
 // Resolve a subscription token to its session, enforcing share + session
 // expiry and the EMOS carrot re-check for real sessions.
 async function resolveShare(req, res, token) {
@@ -1142,14 +1282,9 @@ async function resolveShare(req, res, token) {
   if (!sess || Date.now() > sess.expiresAt) { shares.delete(token); sendJson(res, 403, { ok: false, error: 'subscription expired' }); return null; }
   // Re-check carrot for real EMOS sessions (cached 10 min). Demo sessions skip.
   if (sess.emosToken && Date.now() - sess.lastCarrotCheck > CARROT_RECHECK_MS) {
-    try {
-      const r = await emosCheck(sess.emosToken);
-      sess.carrot = r.carrot; sess.lastCarrotCheck = Date.now();
-      if (!(r.carrot > CARROT_THRESHOLD)) { sendJson(res, 403, { ok: false, error: 'carrot dropped to ' + r.carrot + ' (needs >500) — subscription revoked' }); return null; }
-    } catch (e) {
-      console.error('Sub re-check failed:', e.message);
-      sendJson(res, 502, { ok: false, error: 'EMOS re-check failed, try again later' }); return null;
-    }
+    const verdict = await recheckCarrot(share.sessionId, sess);
+    if (verdict === 'revoked') { sendJson(res, 403, { ok: false, error: 'carrot dropped below 500 (or EMOS token invalid) — subscription revoked, please log in again' }); return null; }
+    // 'ok' or 'stale': serve this request.
   }
   // Access log (sublinkPro per-link access count + IP logs).
   share.access_count += 1;
@@ -1160,6 +1295,9 @@ async function resolveShare(req, res, token) {
 }
 
 async function serveSubscription(req, res, token) {
+  // Subscription fetches are the most hammerable endpoint (token guessing
+  // is infeasible at 128 bit, but a flood still costs probe + EMOS calls).
+  if (!rateLimitCheck(req, res, 'sub:' + clientIp(req), 120, 60 * 1000)) return;
   const resolved = await resolveShare(req, res, token);
   if (!resolved) return;
   const format = resolveClient(req);
@@ -1175,7 +1313,7 @@ async function serveSubscription(req, res, token) {
   const commonHeaders = { 'Cache-Control': 'private, no-store', 'Subscription-Userinfo': userinfo, 'Profile-Title': 'EMOS-gated sing-box' };
 
   if (format === 'html') {
-    const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;');
+    const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
     const page = '<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>订阅 · EMOS-gated</title>'
       + '<style>body{margin:0;padding:28px 20px 48px;min-height:100vh;color:#eef2f8;font-family:system-ui,-apple-system,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;font-size:15px;line-height:1.55;background:radial-gradient(900px 480px at 12% -10%,rgba(99,102,241,.28),transparent 60%),radial-gradient(760px 480px at 92% 0%,rgba(34,211,238,.15),transparent 55%),linear-gradient(180deg,#0b0f1a,#090d16)}.wrap{max-width:640px;margin:0 auto}.card{background:rgba(255,255,255,.045);border:1px solid rgba(255,255,255,.09);border-radius:16px;padding:18px 20px;margin:14px 0;box-shadow:0 12px 32px rgba(0,0,0,.38)}h1{font-size:21px;margin:0 0 6px}h2{font-size:13px;letter-spacing:.1em;text-transform:uppercase;color:#94a3b8;margin:0 0 8px}a{color:#93c5fd;text-decoration:none}a:hover{text-decoration:underline}code{word-break:break-all;background:rgba(0,0,0,.4);padding:2px 7px;border-radius:6px;font-size:13px}.muted{color:#94a3b8;font-size:13px}</style></head><body><div class="wrap">'
       + '<h1>订阅链接</h1><p class="muted">专属订阅地址，萝卜 ≤ 500 即失效。请在客户端里粘贴这条链接，不要用浏览器直接下载。</p>'
@@ -1185,21 +1323,28 @@ async function serveSubscription(req, res, token) {
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', ...commonHeaders });
     return res.end(page);
   }
+  // Build the body BEFORE writeHead: a builder that throws after the 200
+  // headers are sent leaves the connection hanging (and used to crash the
+  // process via the un-awaited handler — see dispatcher).
   if (format === 'clash') {
+    const body = buildClashYaml();
     res.writeHead(200, { 'Content-Type': 'text/yaml; charset=utf-8', 'profile-update-interval': '24', ...commonHeaders });
-    return res.end(buildClashYaml());
+    return res.end(body);
   }
   if (format === 'surge') {
+    const body = buildSurgeConfig(req, token);
     res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8', ...commonHeaders });
-    return res.end(buildSurgeConfig(req, token));
+    return res.end(body);
   }
   if (format === 'links') {
+    const body = buildLinksText();
     res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8', ...commonHeaders });
-    return res.end(buildLinksText());
+    return res.end(body);
   }
   if (format === 'b64') {
+    const body = Buffer.from(buildLinksText(), 'utf8').toString('base64') + '\n';
     res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8', ...commonHeaders });
-    return res.end(Buffer.from(buildLinksText(), 'utf8').toString('base64') + '\n');
+    return res.end(body);
   }
   // singbox (default for sing-box / Hiddify / Karing UA, and ?format=singbox)
   const cfg = buildSingBoxConfig();
@@ -1212,6 +1357,8 @@ async function handleSub(req, res, subToken) { return serveSubscription(req, res
 // --- admin API handlers ---------------------------------------------------
 async function handleAdminLogin(req, res) {
   if (!ADMIN_TOKEN) return sendJson(res, 503, { ok: false, error: 'admin not configured: set ADMIN_TOKEN env and restart the server' });
+  // Brute-force guard: 5 wrong guesses lock this IP for 15 min.
+  if (adminLoginBlocked(clientIp(req))) return sendJson(res, 429, { ok: false, error: 'too many failed logins, try again later' });
   let body;
   try { body = await readBody(req); } catch (e) { return sendJson(res, 400, { ok: false, error: e.message }); }
   // Trim: copy-paste from chat/notes often adds a trailing space or newline.
@@ -1221,10 +1368,11 @@ async function handleAdminLogin(req, res) {
   // the buffers are different lengths — so compare buffers, never strings.
   const a = Buffer.from(token), b = Buffer.from(ADMIN_TOKEN);
   const ok = a.length > 0 && a.length === b.length && crypto.timingSafeEqual(a, b);
-  if (!ok) return sendJson(res, 401, { ok: false, error: 'wrong admin token' });
+  if (!ok) { adminLoginFail(clientIp(req)); return sendJson(res, 401, { ok: false, error: 'wrong admin token' }); }
+  adminLoginFails.delete(clientIp(req));
   const sid = randHex(16);
   adminSessions.set(sid, { createdAt: Date.now(), expiresAt: Date.now() + ADMIN_SESSION_TTL_MS });
-  res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'Set-Cookie': 'admin_session=' + sid + '; HttpOnly; Path=/; Max-Age=86400; SameSite=Lax' });
+  res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'Set-Cookie': 'admin_session=' + sid + '; HttpOnly; Path=/; Max-Age=86400; SameSite=Lax' + cookieSecure(req) });
   // Also return the session id in the body: if the browser does not store
   // or send the HttpOnly cookie (partitioned cookies, privacy modes), the
   // page falls back to sending it as an X-Admin-Token header instead.
@@ -1236,7 +1384,7 @@ function handleAdminLogout(req, res) {
   // Also drop a session presented via the X-Admin-Token header fallback.
   const h = req.headers['x-admin-token'];
   if (typeof h === 'string' && adminSessions.has(h)) adminSessions.delete(h);
-  res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'Set-Cookie': 'admin_session=; HttpOnly; Path=/; Max-Age=0; SameSite=Lax' });
+  res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'Set-Cookie': 'admin_session=; HttpOnly; Path=/; Max-Age=0; SameSite=Lax' + cookieSecure(req) });
   return res.end(JSON.stringify({ ok: true }));
 }
 function handleAdminPage(req, res) {
@@ -1245,7 +1393,7 @@ function handleAdminPage(req, res) {
   // "后台未配置" panel with the exact restart command when it gets a 503.
   // Returning a bare 503 page here used to leave the user with no way to
   // tell a misconfiguration from a broken login form.
-  res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+  res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', ...securityHeaders() });
   return res.end(ADMIN_HTML.split('{{VERSION}}').join(VERSION));
 }
 async function handleAdminApi(req, res) {
@@ -1560,7 +1708,7 @@ function applyTheme(t){document.documentElement.setAttribute("data-theme",t);var
 document.getElementById("btnTheme").onclick=function(){applyTheme(document.documentElement.getAttribute("data-theme")==="light"?"dark":"light")};
 applyTheme(document.documentElement.getAttribute("data-theme")||"dark");
 var nodes=[],editingKey=null,adminSession=null;
-function esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;')}
+function esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;')}
 function fmtTime(t){return t?new Date(t).toLocaleString():'—'}
 async function api(method,path,body){
   var o={method:method,credentials:'include',headers:{'Content-Type':'application/json'}};
@@ -1823,7 +1971,7 @@ var session=null,subUrls=null,importUrl="";
 function copyText(t,msg){if(navigator.clipboard){navigator.clipboard.writeText(t).then(function(){document.getElementById("copyMsg").textContent=msg||"已复制。"})}else{document.getElementById("copyMsg").textContent=t}}
 function fmtExpiry(v){if(!v)return '—';var d=new Date(v);if(isNaN(d.getTime()))return esc(v);var s=String(v).length>=10?String(v).slice(0,10):d.toISOString().slice(0,10);var days=Math.ceil((d.getTime()-Date.now())/86400000);if(days<0)return s+' <span class="pill bad">已过期</span>';if(days<=14)return s+' <span class="pill bad">剩 '+days+' 天</span>';return s+' <span class="muted">剩 '+days+' 天</span>';}
 function fmt(n){if(n==null)return "-";var u=["B","KB","MB","GB","TB"],i=0;while(n>=1024&&i<u.length-1){n/=1024;i++}return n.toFixed(n>=100?0:1)+" "+u[i]}
-function esc(s){return String(s==null?"":s).replace(/&/g,"&amp;").replace(/</g,"&lt;")}
+function esc(s){return String(s==null?"":s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/\"/g,"&quot;").replace(/\'/g,"&#39;")}
 function showMsg(t){document.getElementById("loginMsg").textContent=t}
 function setShareInfo(sh){
   if(!sh)return;
@@ -1912,41 +2060,48 @@ const server = http.createServer(async (req, res) => {
   try {
     const u = new URL(req.url, 'http://localhost');
     if (req.method === 'GET' && u.pathname === '/') {
-      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', ...securityHeaders() });
       return res.end(HTML.split('{{VERSION}}').join(VERSION));
     }
     if (req.method === 'GET' && u.pathname === '/health') return sendJson(res, 200, { ok: true, version: VERSION, nodes: NODES.length });
     if (req.method === 'GET' && u.pathname === '/admin') return handleAdminPage(req, res);
-    if (req.method === 'POST' && u.pathname === '/api/admin/login') return handleAdminLogin(req, res);
-    if (req.method === 'POST' && u.pathname === '/api/admin/logout') return handleAdminLogout(req, res);
-    if (u.pathname.startsWith('/api/admin/')) return handleAdminApi(req, res);
-    if (req.method === 'POST' && u.pathname === '/api/auth') return handleAuth(req, res);
+    if (req.method === 'POST' && u.pathname === '/api/admin/login') return await handleAdminLogin(req, res);
+    if (req.method === 'POST' && u.pathname === '/api/admin/logout') return await handleAdminLogout(req, res);
+    if (u.pathname.startsWith('/api/admin/')) return await handleAdminApi(req, res);
+    if (req.method === 'POST' && u.pathname === '/api/auth') return await handleAuth(req, res);
     if (req.method === 'GET' && u.pathname === '/auth/emos') return handleEmosLogin(req, res);
-    if (req.method === 'GET' && u.pathname === '/auth/emos/callback') return handleEmosCallback(req, res);
+    if (req.method === 'GET' && u.pathname === '/auth/emos/callback') return await handleEmosCallback(req, res);
     if (req.method === 'GET' && u.pathname === '/api/auth/emos/login-url') return handleEmosLoginUrl(req, res);
-    if (req.method === 'GET' && u.pathname === '/api/nodes') return handleNodes(req, res);
-    if (req.method === 'GET' && u.pathname === '/api/sub-link') return handleSubLink(req, res);
-    if (req.method === 'POST' && u.pathname === '/api/sub/refresh') return handleSubRefresh(req, res);
-    if (req.method === 'POST' && u.pathname === '/api/sub/disable') return handleSubDisable(req, res);
-    if (req.method === 'POST' && u.pathname === '/api/logout') return handleLogout(req, res);
-    if (req.method === 'GET' && u.pathname === '/c/') {
+    if (req.method === 'GET' && u.pathname === '/api/nodes') return await handleNodes(req, res);
+    if (req.method === 'GET' && u.pathname === '/api/sub-link') return await handleSubLink(req, res);
+    if (req.method === 'POST' && u.pathname === '/api/sub/refresh') return await handleSubRefresh(req, res);
+    if (req.method === 'POST' && u.pathname === '/api/sub/disable') return await handleSubDisable(req, res);
+    if (req.method === 'POST' && u.pathname === '/api/logout') return await handleLogout(req, res);
+    if (req.method === 'GET' && (u.pathname === '/c/' || u.pathname === '/c')) {
       const token = u.searchParams.get('token');
       if (!token) return sendJson(res, 400, { ok: false, error: 'missing ?token=' });
-      return serveSubscription(req, res, token);
+      return await serveSubscription(req, res, token);
     }
     if (req.method === 'GET' && u.pathname.startsWith('/sub/')) {
       const token = decodeURIComponent(u.pathname.slice(5));
-      return handleSub(req, res, token);
+      return await handleSub(req, res, token);
     }
     return sendJson(res, 404, { ok: false, error: 'not found' });
   } catch (e) {
     console.error(e);
-    return sendJson(res, 500, { ok: false, error: e.message });
+    // If headers already went out (a builder threw mid-response), there is
+    // nothing to send — just close the connection instead of throwing again.
+    if (!res.headersSent) return sendJson(res, 500, { ok: false, error: e.message });
+    try { res.end(); } catch (_) { /* already closed */ }
   }
 });
 
-server.listen(PORT, () => {
-  console.log('emos-sub v' + VERSION + ' listening on http://127.0.0.1:' + PORT);
-  console.log('nodes loaded: ' + NODES.map((n) => n.key + '->probe#' + n.probe_node_id).join(', '));
-});
+if (require.main === module) {
+  server.listen(PORT, () => {
+    console.log('emos-sub v' + VERSION + ' listening on http://127.0.0.1:' + PORT);
+    console.log('nodes loaded: ' + NODES.map((n) => n.key + '->probe#' + n.probe_node_id).join(', '));
+  });
+}
+// Pure helpers exported for test/check-pages.js unit tests (no server started).
+module.exports = { server, monthEndExpireMs, normalizeExpiry, validateProbeId, parseHy2, parseVless, VERSION };
 

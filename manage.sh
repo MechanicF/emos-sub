@@ -64,11 +64,15 @@ running_pid() { # 打印 node server.js 的 pid（安装目录里的）
 }
 health_json() { curl -fsS -m 5 "http://127.0.0.1:$(port_of)/health" 2>/dev/null; }
 write_env() { # write_env KEY VALUE：更新 .env 里一项（不存在则追加），文件 600
-  local key="$1" val="$2" tmp
+  # 值写成双引号形式：口令里有空格、$、引号等特殊字符时，裸值会写坏
+  # .env（bash source 和 systemd EnvironmentFile 都认双引号转义）。
+  # 口令最好还是只用字母数字，少折腾。
+  local key="$1" val="$2" tmp esc
   [ -f "$ENV_FILE" ] || : > "$ENV_FILE"
   tmp="$(mktemp)"
   grep -v -E "^${key}=" "$ENV_FILE" > "$tmp" 2>/dev/null || true
-  printf '%s=%s\n' "$key" "$val" >> "$tmp"
+  esc="$(printf '%s' "$val" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/\$/\\$/g' -e 's/`/\\`/g')"
+  printf '%s="%s"\n' "$key" "$esc" >> "$tmp"
   cat "$tmp" > "$ENV_FILE"; rm -f "$tmp"; chmod 600 "$ENV_FILE"
 }
 gen_token() { head -c 24 /dev/urandom 2>/dev/null | base64 | tr -d '/+=' | head -c 24; echo; }
@@ -97,6 +101,7 @@ cmd_status() {
   if [ -n "$h" ]; then say "健康检查：正常  $h"; else say "健康检查：失败（服务没起来或端口不对）"; fi
   say "控制台：http://127.0.0.1:$port/   后台：http://127.0.0.1:$port/admin"
   local url; url="$(grep -E '^PUBLIC_URL=' "$ENV_FILE" 2>/dev/null | cut -d= -f2-)"
+  url="${url#\"}"; url="${url%\"}"
   [ -n "$url" ] && say "公开域名：$url"
 }
 cmd_health() { health_json && echo && say "健康检查通过" || { err "健康检查失败：http://127.0.0.1:$(port_of)/health 没响应"; return 1; }; }
@@ -105,6 +110,7 @@ cmd_config() {
   say "== 当前配置（$ENV_FILE）=="
   while IFS='=' read -r k v; do
     [ -z "$k" ] && continue
+    v="${v#\"}"; v="${v%\"}" 
     case "$k" in ADMIN_TOKEN) say "$k=${v:0:4}****（已隐藏）";; *) say "$k=$v";; esac
   done < "$ENV_FILE"
 }
@@ -179,6 +185,7 @@ cmd_install() {
   else say "后台口令：沿用原来的（没变）"; fi
   [ -n "$url" ] && write_env PUBLIC_URL "$url"
   if has_systemd; then
+    local node_bin; node_bin="$(command -v node)"
     say "写 systemd 服务 $UNIT ..."
     sudo_if_needed tee "$UNIT" >/dev/null <<EOF
 [Unit]
@@ -190,7 +197,7 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=$INSTALL_DIR
 EnvironmentFile=$ENV_FILE
-ExecStart=/usr/bin/env node server.js
+ExecStart=$node_bin server.js
 Restart=on-failure
 RestartSec=5
 
@@ -255,7 +262,7 @@ cmd_update() {
   [ -f "$INSTALL_DIR/config/settings.json" ] && cp "$INSTALL_DIR/config/settings.json" "$keep/settings.json"
   # 只更新代码文件（不 pull、不 reset --hard，避免本地节点配置被冲掉；
   # 本地改过 server.js 等代码文件会被新版覆盖，改之前已备份）
-  (cd "$INSTALL_DIR" && git checkout origin/main -- server.js README.md manage.sh start.sh .gitignore config/templates) || { err "更新代码文件失败"; rm -rf "$keep"; return 1; }
+  (cd "$INSTALL_DIR" && git checkout origin/main -- server.js README.md manage.sh start.sh .gitignore config/templates test) || { err "更新代码文件失败"; rm -rf "$keep"; return 1; }
   [ -f "$keep/.env" ] && cp "$keep/.env" "$INSTALL_DIR/.env"
   [ -f "$keep/nodes.json" ] && cp "$keep/nodes.json" "$INSTALL_DIR/config/nodes.json"
   [ -f "$keep/settings.json" ] && cp "$keep/settings.json" "$INSTALL_DIR/config/settings.json"
@@ -268,6 +275,8 @@ cmd_backup() {
   local dest="${1:-$INSTALL_DIR/backups}"; mkdir -p "$dest"
   local f="$dest/emos-sub-backup-$(date +%Y%m%d-%H%M%S).tar.gz"
   tar -czf "$f" -C "$INSTALL_DIR" .env config 2>/dev/null || tar -czf "$f" -C "$INSTALL_DIR" .env 2>/dev/null
+  # 只保留最近 10 个备份，旧的自动删（以前无限攒）。
+  ls -t "$dest"/emos-sub-backup-*.tar.gz 2>/dev/null | tail -n +11 | xargs -r rm -f -- 2>/dev/null || true
   say "备份完成：$f（.env + config/）"
 }
 cmd_set_token() {
