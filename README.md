@@ -2,7 +2,7 @@
 
 EMOS 登录核验萝卜余额，**严格大于门槛（默认 500，可在后台改）**才能进入控制台、领取每人专属的订阅链接。节点流量取自 1e.lol 探针的整机总流量，不做每人用量统计。
 
-当前版本：**v1.5.1**（2026-11-26）
+当前版本：**v1.5.2**（2026-11-26）
 
 零依赖 Node.js（Node ≥ 18），不用 `npm install`。单文件 `server.js` + `config/` + `manage.sh`。
 
@@ -104,9 +104,20 @@ curl -fsSL https://raw.githubusercontent.com/MechanicF/emos-sub/main/manage.sh -
 | `SHARE_TTL_HOURS` | 24 | 分享有效期（小时），0 = 永不过期 |
 | `PROBE_CACHE_SECONDS` | 30 | 探针缓存（秒） |
 | `EMOS_APP_NAME` | emos-sub | EMOS `/link` 登录页显示的应用名 |
+| `TRUST_PROXY` | auto | 是否信任 `X-Forwarded-For` 取客户端 IP（用于限流/记录）：`auto` 仅当来源是可信代理地址（本机/内网/IPv6 本地段）时信任——反代部署行为不变、公网直连不再被伪造 XFF 绕过限流；`1` 总是信任（旧行为）；`0` 永不信任（直连加固） |
+| `PROBE_URL` | https://1e.lol/api/nodes | 探针接口地址；一般不用改，便于自建/测试 |
 | `DEMO_ENABLED` | （空） | 仅本地测试用：设为 `1` 才允许演示登录（`POST /api/auth {carrot}`）；正式部署保持关闭 |
 
 后台“设置”页可改门槛、有效期、命名规则、探针缓存，写 `settings.json` 立即生效。优先级：启动时环境变量 > `settings.json` > 默认值。
+
+## 本地加固（v1.5.2，第三方审查后合入）
+
+以下为 v1.5.2 合入的加固（另一位 AI 审查后提出，NEP 逐行核对过 diff、跑过回归才合进来），不改功能：
+
+- **XFF 伪造防护**：`clientIp()` 默认只在来源为本机/内网（`TRUST_PROXY=auto`）时采信 `X-Forwarded-For`，公网直连不再能被伪造 XFF 绕过按 IP 限流。反代部署（nginx 在本机/内网）行为完全不变；需要旧行为可设 `TRUST_PROXY=1`。
+- **探针失败负缓存 + 合并并发**：探针挂掉后失败结果缓存 60 秒（不再每个请求都等满 10 秒超时）；缓存过期瞬间的并发请求合并为一次上游拉取。输出/标记（`probe_source`）不变。
+- **后台登录失败计数清扫**：每小时连同其它过期数据一起清理，避免长期运行的缓慢内存增长。
+- **页面预渲染**：控制台/后台的 `{{VERSION}}` 在启动时替换一次，不再每请求做整页字符串替换（输出字节不变）。
 
 节点放在 `config/nodes.json`（每条：协议链接 + 地区 + 对应的探针 id，可空 + 到期时间 `expires_at`，如 `"2027-11-14"`，可空）。到期时间默认自动取探针的 `expires_at`（1e.lol 探针每台都有，个别没填的显示 —）；手动填的 `expires_at` 会覆盖探针的值。后台添加/编辑节点会原子写入该文件并留 `.bak`，立即生效，不用重启；后台节点表“到期”列同样显示有效到期日，来自探针的标“探针”。
 
@@ -145,6 +156,10 @@ curl -fsSL https://raw.githubusercontent.com/MechanicF/emos-sub/main/manage.sh -
 - **会话与分享落盘**：登录会话、订阅分享、后台会话都存在 `config/state.json`（0600 权限，git 忽略，`manage.sh backup` 会一起备份），重启/更新后订阅地址照常能用，不用重新登录。文件里有活的 EMOS token，绝不要提交、不要发给别人。登录、刷新、停用、吊销、退出时立即写盘；订阅访问次数/最后 IP 每 30 秒批量写一次；正在进行的 EMOS 登录（10 分钟有效）和限流计数不落盘，重启后重新登录即可。
 
 ## 版本历史
+
+### v1.5.2 — 2026-11-26
+
+- **合入第三方审查的加固**：另一位 AI 审了 v1.5.1 的代码，NEP 逐行核对 diff 后合进来（只合了 `server.js`、`README.md`、`test/check-pages.js`；对方 zip 里带的服务器真配置 `nodes.json`/`settings.json`/`state.json` 一个字都没进仓库）。内容：(1) XFF 伪造防护——`clientIp()` 默认只在来源为本机/内网（`TRUST_PROXY=auto`）时采信 `X-Forwarded-For`，公网直连不再能被伪造 XFF 绕过按 IP 限流；反代部署（nginx 在本机/内网）行为完全不变；需要旧行为可设 `TRUST_PROXY=1`；(2) 探针失败负缓存——之前 v1.4.0 的注释说失败也缓存，实际有旧数据那支没更新缓存时间，探针一挂每个请求都等满 10 秒超时；现在失败结果缓存 60 秒（`PROBE_FAIL_CACHE_MS`），另加 singleflight 合并缓存过期瞬间的并发拉取；(3) 每小时清扫连同清理过期的后台登录失败计数；(4) 控制台/后台的 `{{VERSION}}` 启动时替换一次；(5) `PROBE_URL` 可配环境变量。回归测试新增 9 项（7 个 XFF 单测 + 探针负缓存端到端），60 项全过。注意：若以后前面挂了公网 IP 的反代/CDN 再靠 XFF 区分用户，需显式设 `TRUST_PROXY=1`，否则所有用户会共用一个限流桶
 
 ### v1.5.1 — 2026-11-26
 

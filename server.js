@@ -1,4 +1,4 @@
-// EMOS-gated sing-box gateway v1.5.1 — zero dependencies.
+// EMOS-gated sing-box gateway v1.5.2 — zero dependencies.
 // Node >= 18 (uses global fetch). Run: node server.js  (PORT env, default 3000)
 // Scope: EMOS login -> carrot > 500 -> console (nodes + per-user sub links)
 // + NODE TOTAL traffic only, from https://1e.lol/api/nodes. NO per-user traffic.
@@ -19,11 +19,11 @@ const path = require('path');
 const crypto = require('crypto');
 
 const PORT = parseInt(process.env.PORT || '3000', 10);
-const VERSION = '1.5.1';
+const VERSION = '1.5.2';
 const CONFIG_PATH = path.join(__dirname, 'config', 'nodes.json');
 const CLASH_TEMPLATE_PATH = path.join(__dirname, 'config', 'templates', 'clash.yaml');
 const SINGBOX_TEMPLATE_PATH = path.join(__dirname, 'config', 'templates', 'singbox.json');
-const PROBE_URL = 'https://1e.lol/api/nodes';
+const PROBE_URL = process.env.PROBE_URL || 'https://1e.lol/api/nodes';
 const EMOS_BASE = process.env.EMOS_BASE || 'https://emos.best';
 const SESSION_TTL_MS = 24 * 60 * 60 * 1000;
 const CARROT_RECHECK_MS = Math.max(1000, parseInt(process.env.CARROT_RECHECK_MS || '600000', 10) || 600000);
@@ -129,10 +129,41 @@ function shareInfo(s) {
   if (!s) return null;
   return { id: s.id || null, token: s.token, user_id: s.user_id, created_at: s.created_at, expires_at: s.expires_at, enabled: s.enabled, access_count: s.access_count, last_ip: s.last_ip, last_user_agent: s.last_user_agent, last_access_at: s.last_access_at };
 }
+// Anti-spoof: X-Forwarded-For is attacker-controlled on a direct connection.
+// Default 'auto' trusts it only when the peer is loopback/private (the usual
+// local reverse-proxy setup), so existing reverse-proxy deployments keep
+// per-user IPs while a direct-to-Internet deployment can no longer bypass
+// IP rate limits by rotating a fake XFF. Override with TRUST_PROXY=1 (always
+// trust, old behaviour) or TRUST_PROXY=0 (never trust).
+const TRUST_PROXY_MODE = (process.env.TRUST_PROXY || 'auto').toLowerCase();
+function isTrustedProxyPeer(remote) {
+  if (typeof remote !== 'string') return false;
+  let a = remote;
+  if (a.startsWith('::ffff:')) a = a.slice(7); // IPv4-mapped IPv6
+  if (a === '::1') return true;
+  if (/^127\./.test(a)) return true;
+  if (/^10\./.test(a)) return true;
+  if (/^192\.168\./.test(a)) return true;
+  if (/^172\.(1[6-9]|2\d|3[01])\./.test(a)) return true;
+  if (/^169\.254\./.test(a)) return true;
+  if (/^f[cd][0-9a-f]{2}:/i.test(a)) return true; // fc00::/7 unique local
+  if (/^fe[89ab][0-9a-f]:/i.test(a)) return true; // fe80::/10 link local
+  return false;
+}
+function resolveClientIp(remoteAddress, xff, mode) {
+  const remote = typeof remoteAddress === 'string' ? remoteAddress : null;
+  let trust;
+  if (mode === '1' || mode === 'true' || mode === 'always') trust = true;
+  else if (mode === '0' || mode === 'false' || mode === 'never') trust = false;
+  else trust = isTrustedProxyPeer(remote); // auto
+  if (trust && typeof xff === 'string' && xff) {
+    const first = xff.split(',')[0].trim();
+    if (first) return first;
+  }
+  return remote;
+}
 function clientIp(req) {
-  const fwd = req.headers['x-forwarded-for'];
-  if (typeof fwd === 'string' && fwd) return fwd.split(',')[0].trim();
-  return (req.socket && req.socket.remoteAddress) || null;
+  return resolveClientIp(req.socket && req.socket.remoteAddress, req.headers['x-forwarded-for'], TRUST_PROXY_MODE);
 }
 
 // --- rate limiting (anti brute-force / anti abuse) -----------------------
@@ -179,6 +210,7 @@ setInterval(() => {
   }
   for (const [sid, s] of adminSessions) if (now > s.expiresAt) { pruned = true; adminSessions.delete(sid); }
   for (const [k, v] of rateLimits) if (now > v.resetAt) rateLimits.delete(k);
+  for (const [ip, v] of adminLoginFails) if (now - v.firstAt > ADMIN_LOGIN_LOCK_MS) adminLoginFails.delete(ip);
   if (pruned) saveStateNow();
   prunePendingEmosLogins();
 }, 60 * 60 * 1000).unref();
@@ -968,25 +1000,35 @@ function userinfoHeader(t) {
 
 // --- probe (1e.lol) ------------------------------------------------------
 let probeCache = { at: 0, data: null, source: 'live' };
+// A failed fetch is cached too (with a longer TTL) so a down probe does not
+// make every request pay the full 10 s timeout. In-flight fetches are shared
+// so a burst after cache expiry triggers one upstream call, not N.
+const PROBE_FAIL_CACHE_MS = 60 * 1000;
+let probeInflight = null;
 async function fetchProbe() {
   const now = Date.now();
-  if (probeCache.data && now - probeCache.at < PROBE_CACHE_MS) return probeCache;
-  try {
-    const r = await fetch(PROBE_URL, { signal: AbortSignal.timeout(10000), headers: { Accept: 'application/json' } });
-    if (!r.ok) throw new Error('probe HTTP ' + r.status);
-    const j = await r.json();
-    if (!Array.isArray(j.nodes)) throw new Error('probe: no nodes array');
-    probeCache = { at: now, data: j.nodes, source: 'live' };
+  const ttl = probeCache.source === 'live' ? PROBE_CACHE_MS : PROBE_FAIL_CACHE_MS;
+  if (probeCache.data && now - probeCache.at < ttl) return probeCache;
+  if (probeInflight) return probeInflight;
+  probeInflight = (async () => {
+    try {
+      const r = await fetch(PROBE_URL, { signal: AbortSignal.timeout(10000), headers: { Accept: 'application/json' } });
+      if (!r.ok) throw new Error('probe HTTP ' + r.status);
+      const j = await r.json();
+      if (!Array.isArray(j.nodes)) throw new Error('probe: no nodes array');
+      probeCache = { at: Date.now(), data: j.nodes, source: 'live' };
+    } catch (e) {
+      console.error('Probe fetch failed, using labelled sample fallback:', e.message);
+      // Keep any stale live data (labelled) when we have it; otherwise sample.
+      // Cache the failure with at=now so the next request does not re-fetch.
+      const stale = probeCache.data;
+      probeCache = { at: Date.now(), data: stale || SAMPLE_PROBE, source: stale ? 'live-stale' : 'sample-fallback' };
+    } finally {
+      probeInflight = null;
+    }
     return probeCache;
-  } catch (e) {
-    console.error('Probe fetch failed, using labelled sample fallback:', e.message);
-    // Keep any stale live cache if we have it; otherwise sample (labelled).
-    // Cache the failure too: without this, every request paid the full 10 s
-    // fetch timeout while the probe was down.
-    if (probeCache.data) return { ...probeCache, source: 'live-stale' };
-    probeCache = { at: now, data: SAMPLE_PROBE, source: 'sample-fallback' };
-    return probeCache;
-  }
+  })();
+  return probeInflight;
 }
 
 function mapNodes(probeNodes) {
@@ -1461,7 +1503,7 @@ function handleAdminPage(req, res) {
   // Returning a bare 503 page here used to leave the user with no way to
   // tell a misconfiguration from a broken login form.
   res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', ...securityHeaders() });
-  return res.end(ADMIN_HTML.split('{{VERSION}}').join(VERSION));
+  return res.end(ADMIN_HTML_RENDERED);
 }
 async function handleAdminApi(req, res) {
   const u = new URL(req.url, 'http://localhost');
@@ -2139,7 +2181,7 @@ const server = http.createServer(async (req, res) => {
     const u = new URL(req.url, 'http://localhost');
     if (req.method === 'GET' && u.pathname === '/') {
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', ...securityHeaders() });
-      return res.end(HTML.split('{{VERSION}}').join(VERSION));
+      return res.end(HTML_RENDERED);
     }
     if (req.method === 'GET' && u.pathname === '/health') return sendJson(res, 200, { ok: true, version: VERSION, nodes: NODES.length });
     if (req.method === 'GET' && u.pathname === '/admin') return handleAdminPage(req, res);
@@ -2186,6 +2228,10 @@ if (require.main === module) {
     console.log('nodes loaded: ' + NODES.map((n) => n.key + '->probe#' + n.probe_node_id).join(', '));
   });
 }
+// Pre-rendered pages: avoid a split/join over the full HTML on every request.
+const HTML_RENDERED = HTML.split('{{VERSION}}').join(VERSION);
+const ADMIN_HTML_RENDERED = ADMIN_HTML.split('{{VERSION}}').join(VERSION);
+
 // Pure helpers exported for test/check-pages.js unit tests (no server started).
-module.exports = { server, monthEndExpireMs, normalizeExpiry, validateProbeId, parseHy2, parseVless, VERSION };
+module.exports = { server, monthEndExpireMs, normalizeExpiry, validateProbeId, parseHy2, parseVless, resolveClientIp, VERSION };
 

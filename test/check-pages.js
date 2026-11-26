@@ -45,6 +45,16 @@ unit('parseHy2 rejects port 99999', lib.parseHy2('hysteria2://pass@203.0.113.1:9
 unit('parseHy2 accepts port 443', lib.parseHy2('hysteria2://pass@203.0.113.1:443/?sni=x.example#t') !== null);
 unit('parseVless rejects REALITY without pbk', lib.parseVless('vless://11111111-1111-4111-8111-111111111111@203.0.113.1:443?security=reality&sni=x.example#t') === null);
 unit('parseVless accepts REALITY with pbk', lib.parseVless('vless://11111111-1111-4111-8111-111111111111@203.0.113.1:443?security=reality&sni=x.example&pbk=abc123#t') !== null);
+// XFF anti-spoof (TRUST_PROXY): default 'auto' trusts XFF only from a local
+// proxy peer; a public peer cannot fake its IP to bypass rate limits.
+const rip = lib.resolveClientIp;
+unit('XFF auto: loopback peer trusts forwarded IP (reverse proxy unchanged)', rip('127.0.0.1', '203.0.113.9', 'auto') === '203.0.113.9');
+unit('XFF auto: private proxy peer trusts forwarded IP', rip('192.168.1.5', '203.0.113.9', 'auto') === '203.0.113.9');
+unit('XFF auto: public peer ignores fake forwarded IP', rip('8.8.8.8', '1.2.3.4', 'auto') === '8.8.8.8');
+unit('XFF auto: IPv4-mapped loopback trusts forwarded IP', rip('::ffff:127.0.0.1', '203.0.113.9', 'auto') === '203.0.113.9');
+unit('XFF mode 1 always trusts (old behaviour, opt-in)', rip('8.8.8.8', '1.2.3.4', '1') === '1.2.3.4');
+unit('XFF mode 0 never trusts (direct deploy, hardened)', rip('127.0.0.1', '1.2.3.4', '0') === '127.0.0.1');
+unit('XFF empty value falls back to peer IP', rip('127.0.0.1', '  ', 'auto') === '127.0.0.1');
 if (unitFail) process.exit(1);
 
 // ---- HTTP helpers ---------------------------------------------------------
@@ -273,7 +283,7 @@ const srv = spawnServer(REPO, PORT, { EMOS_STATE_FILE: stateFile('main') });
     else ok('broken sing-box template returns 500 JSON, server stays alive');
     csrv2.kill();
   } catch (e) { console.error('FAIL copy-server tests:', e.message); code = 1; }
-  fs.rmSync(copyDir, { recursive: true, force: true });
+  try { fs.rmSync(copyDir, { recursive: true, force: true }); } catch (e) { console.log('NOTE copy-dir cleanup deferred (Windows lock): ' + e.code); }
 
   // ---- mock-EMOS test: a dropped carrot must revoke immediately ---------
   // No free re-check window: the old code set lastCarrotCheck before the
@@ -348,6 +358,33 @@ const srv = spawnServer(REPO, PORT, { EMOS_STATE_FILE: stateFile('main') });
     gsrv.kill();
   } catch (e) { console.error('FAIL mock-EMOS tests:', e.message); code = 1; }
   mockEmos.close();
+
+  // ---- probe negative cache: a down probe must not be re-fetched per request
+  // Before this fix a failed fetch kept at=0, so every request re-paid the
+  // full fetch timeout. Mock probe fails fast, then count fetches across a
+  // burst of /api/nodes calls within the failure-cache window.
+  let probeHits = 0;
+  const mockProbe = http.createServer((req, res) => { probeHits++; res.writeHead(500); res.end('down'); });
+  await new Promise((r) => mockProbe.listen(3114, '127.0.0.1', r));
+  const PPORT = 3115;
+  try {
+    const psrv = spawnServer(REPO, PPORT, { PROBE_URL: 'http://127.0.0.1:3114/api/nodes', PROBE_CACHE_SECONDS: '1', EMOS_STATE_FILE: stateFile('probe') });
+    await waitUp(PPORT);
+    const plogin = await postJson(PPORT, '/api/auth', { carrot: 600 });
+    if (!plogin.ok) throw new Error('probe-test login failed');
+    const H = { 'X-Session': plogin.session };
+    await get(PPORT, '/api/nodes', H); // first call: one probe fetch (fails, cached)
+    const hitsAfterFirst = probeHits;
+    for (let i = 0; i < 5; i++) await get(PPORT, '/api/nodes', H); // burst inside fail window
+    if (hitsAfterFirst !== 1 || probeHits !== 1) {
+      fail('probe negative cache: expected 1 fetch total, got first=' + hitsAfterFirst + ' total=' + probeHits);
+    } else ok('probe negative cache: 6 requests within fail window trigger only 1 fetch');
+    const pnodes = JSON.parse(await get(PPORT, '/api/nodes', H));
+    if (pnodes.probe_source !== 'sample-fallback') fail('probe fallback not labelled: ' + pnodes.probe_source);
+    else ok('probe failure labelled sample-fallback');
+    psrv.kill();
+  } catch (e) { console.error('FAIL probe negative-cache tests:', e.message); code = 1; }
+  mockProbe.close();
 
   // ---- restart persistence: sessions/shares survive a restart (v1.5.0) ----
   // Before this, sessions + shares lived only in memory: every manage.sh
