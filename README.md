@@ -2,7 +2,7 @@
 
 EMOS 登录核验萝卜余额，超过 500 才能进入控制台、领取专属订阅链接。节点流量取自 1e.lol 探针的整机总流量，不做每人用量统计。
 
-当前版本：**v1.2.0**（2026-11-26）
+当前版本：**v1.3.0**（2026-11-26）
 
 零依赖 Node.js（Node ≥ 18），不用 `npm install`。
 
@@ -25,7 +25,7 @@ PORT=3000 ADMIN_TOKEN=你的口令 node server.js
 ```bash
 cd emos-sub            # 或安装目录 /opt/emos-sub
 ./manage.sh update     # 备份配置 → 拉取最新代码 → 重启
-./manage.sh status     # 查看程序版本（v1.2.0）、git 提交、运行状态、端口、健康检查
+./manage.sh status     # 查看程序版本（v1.3.0）、git 提交、运行状态、端口、健康检查
 ```
 
 `update` 只更新代码文件（`server.js`、`manage.sh`、`start.sh`、模板），`.env` 和 `config/`（节点、设置）原样保留，更新前自动备份到 `backups/`。
@@ -71,14 +71,14 @@ curl -fsSL https://raw.githubusercontent.com/MechanicF/emos-sub/main/manage.sh -
 
 后台“设置”页可改门槛、有效期、命名规则、探针缓存，写 `settings.json` 立即生效。优先级：启动时环境变量 > `settings.json` > 默认值。
 
-节点放在 `config/nodes.json`（每条：协议链接 + 地区 + 对应的探针 id，可空）。后台添加/编辑节点会原子写入该文件并留 `.bak`，立即生效，不用重启。
+节点放在 `config/nodes.json`（每条：协议链接 + 地区 + 对应的探针 id，可空 + 到期时间 `expires_at`，如 `"2027-11-14"`，可空）。后台添加/编辑节点会原子写入该文件并留 `.bak`，立即生效，不用重启。控制台节点表在最上面（订阅链接在下面），“到期”一列显示到期日和剩余天数，14 天内和已过期标红；没填到期时间显示 —。
 
 ## 使用
 
 **用户（控制台 `/`）：**
 
 1. 点“用 EMOS 账号登录”，跳到 EMOS（emos.best）登录，登录完自动跳回本站；服务端验 token（`sign/check` + `carrot/current`），萝卜 > 500 放行。
-2. 控制台显示节点总流量（探针）和一条订阅链接（全客户端通用，见下）与一键导入 sing-box。
+2. 控制台上面是节点总流量（探针）与到期时间，下面是一条订阅链接（全客户端通用，见下）与一键导入 sing-box。
 3. 订阅链接每人专属，绑定 EMOS `user_id`，可刷新（旧链接立即失效）或停用。登录后登录卡片自动隐藏，右上角“退出登录”结束会话。
 4. 备用登录：手动粘贴 EMOS Bearer Token。
 
@@ -127,6 +127,11 @@ curl -fsSL https://raw.githubusercontent.com/MechanicF/emos-sub/main/manage.sh -
 - 后台：`POST /api/admin/login`、`POST /api/admin/logout`、`GET /api/admin/health`、`GET|POST|PUT|DELETE /api/admin/nodes`（含 `/parse`、`/reorder`）、`GET /api/admin/shares`（刷新/停用/启用/吊销/全部吊销）、`GET|PUT /api/admin/settings`
 
 ## 版本历史
+
+### v1.3.0 — 2026-11-26
+
+- 控制台布局调整：节点信息（总流量表）在上，订阅相关在下
+- 节点增加到期时间：`nodes.json` 每条可填 `expires_at`（`YYYY-MM-DD`），后台添加/编辑节点时有“到期时间”输入框；控制台“到期”列显示到期日和剩余天数，14 天内和已过期标红，未填显示 —
 
 ### v1.2.0 — 2026-11-26
 

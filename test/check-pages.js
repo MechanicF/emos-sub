@@ -90,6 +90,24 @@ function getUA(p, ua) {
     if (!consoleHtml.includes('id="subAuto"') || consoleHtml.includes('id="subSingbox"') || consoleHtml.includes('id="subClash"')) {
       console.error('FAIL console subscription section is not the single auto link'); code = 1;
     } else console.log('OK   console shows one auto-adaptive subscription link');
+    // Layout: nodes card above subscription card, with an expiry column.
+    if (!consoleHtml.includes('<th>到期</th>') || consoleHtml.indexOf('节点 · 总流量') > consoleHtml.indexOf('订阅链接（每人专属')) {
+      console.error('FAIL console layout: nodes must be above subscription and have an expiry column'); code = 1;
+    } else console.log('OK   console layout: nodes above subscription, expiry column present');
+    // /api/nodes exposes expires_at (null for demo nodes without one).
+    const nodesRes = await new Promise((res, rej) => {
+      const req = http.request({ host: '127.0.0.1', port: PORT, path: '/api/nodes', headers: { 'X-Session': auth.session } }, (r) => {
+        let d = ''; r.on('data', (c) => (d += c)); r.on('end', () => res(JSON.parse(d)));
+      });
+      req.on('error', rej); req.end();
+    });
+    if (!nodesRes.ok || !Array.isArray(nodesRes.nodes) || !nodesRes.nodes.every((n) => 'expires_at' in n)) {
+      console.error('FAIL /api/nodes does not expose expires_at'); code = 1;
+    } else console.log('OK   /api/nodes exposes expires_at (' + nodesRes.nodes.length + ' nodes)');
+    // Admin node form has the expiry input.
+    const adminHtml = await get('/admin');
+    if (!adminHtml.includes('id="nodeExpiry"')) { console.error('FAIL admin node form has no expiry input'); code = 1; }
+    else console.log('OK   admin node form has expiry input');
   } catch (e) { console.error('FAIL', e.message); code = 1; }
   srv.kill();
   process.exit(code);

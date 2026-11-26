@@ -1,4 +1,4 @@
-// EMOS-gated sing-box gateway v1.2.0 — zero dependencies.
+// EMOS-gated sing-box gateway v1.3.0 — zero dependencies.
 // Node >= 18 (uses global fetch). Run: node server.js  (PORT env, default 3000)
 // Scope: EMOS login -> carrot > 500 -> console (nodes + per-user sub links)
 // + NODE TOTAL traffic only, from https://1e.lol/api/nodes. NO per-user traffic.
@@ -14,7 +14,7 @@ const path = require('path');
 const crypto = require('crypto');
 
 const PORT = parseInt(process.env.PORT || '3000', 10);
-const VERSION = '1.2.0';
+const VERSION = '1.3.0';
 const CONFIG_PATH = path.join(__dirname, 'config', 'nodes.json');
 const CLASH_TEMPLATE_PATH = path.join(__dirname, 'config', 'templates', 'clash.yaml');
 const SINGBOX_TEMPLATE_PATH = path.join(__dirname, 'config', 'templates', 'singbox.json');
@@ -253,6 +253,16 @@ function uniqueKey(base) {
   while (NODES.some((n) => n.key === key)) { key = base + '-' + i; i += 1; }
   return key;
 }
+// Node expiry: stored as a YYYY-MM-DD date string in nodes.json.
+// null = not set (shown as —), undefined = invalid input (caller 400s).
+function normalizeExpiry(v) {
+  if (v === null || v === undefined || v === '') return null;
+  if (typeof v !== 'string') return undefined;
+  const s = v.trim();
+  const d = new Date(s);
+  if (isNaN(d.getTime())) return undefined;
+  return d.toISOString().slice(0, 10);
+}
 function validateProbeId(v) {
   if (v === null || v === undefined || v === '') return null;
   const n = typeof v === 'number' ? v : parseInt(String(v), 10);
@@ -275,7 +285,7 @@ function nodeAdminView(n, probeMap) {
     server: parsed ? parsed.server : null, server_port: parsed ? parsed.server_port : null,
     sni: parsed ? (parsed.sni || (parsed.tls && parsed.tls.server_name) || null) : null,
     link_name: parsed ? parsed.tag : null,
-    probe_node_id: n.probe_node_id ?? null, probe_name: p ? p.name : (n.probe_name || null),
+    probe_node_id: n.probe_node_id ?? null, probe_name: p ? p.name : (n.probe_name || null), expires_at: normalizeExpiry(n.expires_at),
     online: p ? !!p.online : null, probe_missing: !p,
   };
 }
@@ -855,14 +865,14 @@ function mapNodes(probeNodes) {
     if (!p) {
       // Node is not in the probe (probe_node_id null or unknown): traffic
       // and status are UNKNOWN — null, never fabricated zeros.
-      return { key: n.key, name: n.name, region: n.region, probe_node_id: n.probe_node_id ?? null, probe_name: n.probe_name, online: null, probe_missing: true, net_rx: null, net_tx: null, day_used: null, month_used: null, traffic_limit: null, remaining: null, pct_used: null, reset_day: null, cpu: null, uptime: null };
+      return { key: n.key, name: n.name, region: n.region, expires_at: normalizeExpiry(n.expires_at), probe_node_id: n.probe_node_id ?? null, probe_name: n.probe_name, online: null, probe_missing: true, net_rx: null, net_tx: null, day_used: null, month_used: null, traffic_limit: null, remaining: null, pct_used: null, reset_day: null, cpu: null, uptime: null };
     }
     const m = p.metrics || {};
     const monthRx = p.month_rx || 0, monthTx = p.month_tx || 0;
     const monthUsed = typeof p.month_used === 'number' ? p.month_used : monthRx + monthTx;
     const limit = p.traffic_limit || 0;
     return {
-      key: n.key, name: n.name, region: n.region || p.country || '',
+      key: n.key, name: n.name, region: n.region || p.country || '', expires_at: normalizeExpiry(n.expires_at),
       probe_node_id: p.id, probe_name: p.name,
       online: !!p.online, net_rx: m.net_rx || 0, net_tx: m.net_tx || 0,
       day_used: (p.day_rx || 0) + (p.day_tx || 0),
@@ -1270,6 +1280,8 @@ async function handleAdminApi(req, res) {
     const probeId = validateProbeId(body.probe_node_id);
     if (probeId === undefined) return sendJson(res, 400, { ok: false, error: 'probe_node_id must be a positive integer or null' });
     const region = typeof body.region === 'string' ? body.region.trim().toUpperCase() : '';
+    const expiresAt = normalizeExpiry(body.expires_at);
+    if (expiresAt === undefined) return sendJson(res, 400, { ok: false, error: 'expires_at must be a date like 2027-11-14 or null' });
     let name = typeof body.name === 'string' ? body.name.trim() : '';
     if (!name) name = parsed.tag || (protocol + ' node');
     if (region && name.indexOf('·') < 0) name = region + ' · ' + name;
@@ -1279,7 +1291,7 @@ async function handleAdminApi(req, res) {
     } else {
       key = uniqueKey(protocol + '-' + slugify((region ? region + '-' : '') + shortName({ name })));
     }
-    const node = { key, name, region, link, probe_node_id: probeId, probe_name: null };
+    const node = { key, name, region, link, probe_node_id: probeId, probe_name: null, expires_at: expiresAt };
     NODES.push(node);
     saveNodesConfig();
     return sendJson(res, 200, { ok: true, node });
@@ -1324,6 +1336,7 @@ async function handleAdminApi(req, res) {
       n.probe_node_id = pid;
     }
     if ('probe_name' in body && (body.probe_name === null || typeof body.probe_name === 'string')) n.probe_name = body.probe_name || null;
+    if ('expires_at' in body) { const e = normalizeExpiry(body.expires_at); if (e === undefined) return sendJson(res, 400, { ok: false, error: 'expires_at must be a date like 2027-11-14 or null' }); n.expires_at = e; }
     saveNodesConfig();
     return sendJson(res, 200, { ok: true, node: n });
   }
@@ -1523,6 +1536,7 @@ pre{background:rgba(0,0,0,.4);border:1px solid var(--border);border-radius:10px;
 <div><label>地区代码（可选，如 HK / JP / US）</label><input id="nodeRegion" placeholder="JP"></div></div>
 <div class="row"><div><label>探针 id（可选）</label><input id="nodeProbe" type="number" placeholder="20"></div>
 <div><label>Key（可选，自动生成）</label><input id="nodeKey" placeholder="hy2-jp-xxx"></div></div>
+<div class="row"><div><label>到期时间（可选，如 2027-11-14）</label><input id="nodeExpiry" type="date"></div></div>
 <button type="button" id="btnParse">解析预览</button> <button type="button" id="btnSaveNode">保存节点</button> <button type="button" class="ghost hidden" id="btnCancelEdit">取消编辑</button>
 <pre id="nodePreview" class="hidden"></pre><p id="nodeMsg" class="msg"></p></div>
 
@@ -1644,7 +1658,7 @@ async function initAdmin(){
   if(r.status===0){showLogin(r.json.error||'无法连接服务器。');return;}
   showLogin('');
 }
-window.editNode=function(i){var n=nodes[i];if(!n)return;editingKey=n.key;document.getElementById('formTitle').textContent='编辑节点：'+n.key;document.getElementById('nodeLink').value=n.link||'';document.getElementById('nodeName').value=n.name;document.getElementById('nodeRegion').value=n.region||'';document.getElementById('nodeProbe').value=n.probe_node_id==null?'':n.probe_node_id;document.getElementById('nodeKey').value=n.key;document.getElementById('nodeKey').disabled=true;document.getElementById('btnCancelEdit').classList.remove('hidden');document.getElementById('nodeMsg').textContent='正在编辑 '+n.key+'：改链接会重新解析；不改链接只改名字/地区/探针 id。';window.scrollTo(0,document.getElementById('formTitle').offsetTop)};
+window.editNode=function(i){var n=nodes[i];if(!n)return;editingKey=n.key;document.getElementById('formTitle').textContent='编辑节点：'+n.key;document.getElementById('nodeLink').value=n.link||'';document.getElementById('nodeName').value=n.name;document.getElementById('nodeRegion').value=n.region||'';document.getElementById('nodeProbe').value=n.probe_node_id==null?'':n.probe_node_id;document.getElementById('nodeKey').value=n.key;document.getElementById('nodeExpiry').value=n.expires_at||'';document.getElementById('nodeKey').disabled=true;document.getElementById('btnCancelEdit').classList.remove('hidden');document.getElementById('nodeMsg').textContent='正在编辑 '+n.key+'：改链接会重新解析；不改链接只改名字/地区/探针 id/到期时间。';window.scrollTo(0,document.getElementById('formTitle').offsetTop)};
 window.delNode=async function(key){if(!confirm('确定删除节点 '+key+'？订阅里会立刻去掉它。'))return;var r=await api('DELETE','/api/admin/nodes/'+encodeURIComponent(key));if(!r.json.ok){document.getElementById('nodeMsg').textContent='删除失败：'+(r.json.error||'');return}document.getElementById('nodeMsg').textContent='已删除 '+key+'。';await loadNodes();await loadHealth()};
 window.moveNode=async function(i,dir){var j=i+dir;if(j<0||j>=nodes.length)return;var keys=nodes.map(function(n){return n.key});var t=keys[i];keys[i]=keys[j];keys[j]=t;var r=await api('POST','/api/admin/nodes/reorder',{keys:keys});if(!r.json.ok){document.getElementById('nodeMsg').textContent='排序失败：'+(r.json.error||'');return}await loadNodes()};
 window.shareAct=async function(id,action){var r=await api('POST','/api/admin/shares/'+encodeURIComponent(id)+'/'+action);if(!r.json.ok){document.getElementById('shareMsg').textContent='操作失败：'+(r.json.error||'');return}document.getElementById('shareMsg').textContent=action==='refresh'?'已刷新，旧链接立即失效。':(action==='disable'?'已停用。':'已启用。');await loadShares()};
@@ -1685,8 +1699,8 @@ document.getElementById('btnCopyCmd').onclick=function(){
   if(navigator.clipboard){navigator.clipboard.writeText(cmd).then(function(){document.getElementById('btnCopyCmd').textContent='已复制';});}
 };
 document.getElementById('btnParse').onclick=async function(){var link=document.getElementById('nodeLink').value.trim();if(!link){document.getElementById('nodeMsg').textContent='先粘贴节点链接。';return}var r=await api('POST','/api/admin/nodes/parse',{link:link});var pre=document.getElementById('nodePreview');pre.classList.remove('hidden');if(!r.json.ok){pre.textContent='解析失败：'+(r.json.error||'');return}pre.textContent='协议：'+r.json.protocol+'\\n'+JSON.stringify(r.json.parsed,null,2);document.getElementById('nodeMsg').textContent='解析成功，确认无误后点“保存节点”。'};
-document.getElementById('btnSaveNode').onclick=async function(){var link=document.getElementById('nodeLink').value.trim();var name=document.getElementById('nodeName').value.trim();var region=document.getElementById('nodeRegion').value.trim();var probe=document.getElementById('nodeProbe').value;var key=document.getElementById('nodeKey').value.trim();if(!link){document.getElementById('nodeMsg').textContent='链接不能为空。';return}var body={link:link,name:name,region:region,probe_node_id:probe===''?null:Number(probe)};var r;if(editingKey){r=await api('PUT','/api/admin/nodes/'+encodeURIComponent(editingKey),body)}else{if(key)body.key=key;r=await api('POST','/api/admin/nodes',body)}if(!r.json.ok){document.getElementById('nodeMsg').textContent='保存失败：'+(r.json.error||'');return}document.getElementById('nodeMsg').textContent='已保存：'+(r.json.node&&r.json.node.key);editingKey=null;document.getElementById('formTitle').textContent='添加节点';document.getElementById('nodeLink').value='';document.getElementById('nodeName').value='';document.getElementById('nodeRegion').value='';document.getElementById('nodeProbe').value='';document.getElementById('nodeKey').value='';document.getElementById('nodeKey').disabled=false;document.getElementById('btnCancelEdit').classList.add('hidden');document.getElementById('nodePreview').classList.add('hidden');await loadNodes();await loadHealth()};
-document.getElementById('btnCancelEdit').onclick=function(){editingKey=null;document.getElementById('formTitle').textContent='添加节点';document.getElementById('nodeLink').value='';document.getElementById('nodeName').value='';document.getElementById('nodeRegion').value='';document.getElementById('nodeProbe').value='';document.getElementById('nodeKey').value='';document.getElementById('nodeKey').disabled=false;document.getElementById('btnCancelEdit').classList.add('hidden');document.getElementById('nodeMsg').textContent=''};
+document.getElementById('btnSaveNode').onclick=async function(){var link=document.getElementById('nodeLink').value.trim();var name=document.getElementById('nodeName').value.trim();var region=document.getElementById('nodeRegion').value.trim();var probe=document.getElementById('nodeProbe').value;var key=document.getElementById('nodeKey').value.trim();var expiry=document.getElementById('nodeExpiry').value;if(!link){document.getElementById('nodeMsg').textContent='链接不能为空。';return}var body={link:link,name:name,region:region,probe_node_id:probe===''?null:Number(probe),expires_at:expiry||null};var r;if(editingKey){r=await api('PUT','/api/admin/nodes/'+encodeURIComponent(editingKey),body)}else{if(key)body.key=key;r=await api('POST','/api/admin/nodes',body)}if(!r.json.ok){document.getElementById('nodeMsg').textContent='保存失败：'+(r.json.error||'');return}document.getElementById('nodeMsg').textContent='已保存：'+(r.json.node&&r.json.node.key);editingKey=null;document.getElementById('formTitle').textContent='添加节点';document.getElementById('nodeLink').value='';document.getElementById('nodeName').value='';document.getElementById('nodeRegion').value='';document.getElementById('nodeProbe').value='';document.getElementById('nodeExpiry').value='';document.getElementById('nodeKey').value='';document.getElementById('nodeKey').disabled=false;document.getElementById('btnCancelEdit').classList.add('hidden');document.getElementById('nodePreview').classList.add('hidden');await loadNodes();await loadHealth()};
+document.getElementById('btnCancelEdit').onclick=function(){editingKey=null;document.getElementById('formTitle').textContent='添加节点';document.getElementById('nodeLink').value='';document.getElementById('nodeName').value='';document.getElementById('nodeRegion').value='';document.getElementById('nodeProbe').value='';document.getElementById('nodeExpiry').value='';document.getElementById('nodeKey').value='';document.getElementById('nodeKey').disabled=false;document.getElementById('btnCancelEdit').classList.add('hidden');document.getElementById('nodeMsg').textContent=''};
 document.getElementById('btnRevokeAll').onclick=async function(){if(!confirm('确定吊销全部订阅链接？所有用户的订阅立即失效，他们需要重新登录。'))return;var r=await api('POST','/api/admin/shares/revoke-all');if(!r.json.ok){document.getElementById('shareMsg').textContent='操作失败：'+(r.json.error||'');return}document.getElementById('shareMsg').textContent='已吊销 '+r.json.revoked+' 条分享。';await loadShares()};
 document.getElementById('btnSaveSettings').onclick=async function(){var body={carrot_threshold:Number(document.getElementById('setThreshold').value),share_ttl_hours:Number(document.getElementById('setTtl').value),name_rule:document.getElementById('setNameRule').value,probe_cache_seconds:Number(document.getElementById('setProbeCache').value)};var r=await api('PUT','/api/admin/settings',body);if(!r.json.ok){document.getElementById('setMsg').textContent='保存失败：'+(r.json.error||'');return}var w=(r.json.warnings||[]).join(' ');document.getElementById('setMsg').textContent='已保存，立即生效。'+(w?' 注意：'+w:'');await loadSettings()};
 initAdmin();
@@ -1792,6 +1806,7 @@ code{word-break:break-all;background:rgba(0,0,0,.4);padding:2px 7px;border-radiu
 <div class="stat"><div class="k">节点</div><div class="v" id="statNodes">—</div><div class="s">订阅内容</div></div>
 <div class="stat"><div class="k">订阅访问</div><div class="v" id="statAccess">—</div><div class="s">本条链接</div></div>
 </div>
+<div class="card"><h2>节点 · 总流量（探针）</h2><p class="muted" id="probeNote"></p><div class="table-scroll"><table><thead><tr><th>节点</th><th>到期</th><th>状态 / 实时</th><th>今日</th><th>本月已用 / 限额</th><th>CPU / 运行</th></tr></thead><tbody id="nodeRows"></tbody></table></div></div>
 <div class="card"><h2>已达标</h2><p>用户：<code id="who"></code> · 萝卜：<b id="carrotOut"></b>（门槛 &gt; 500）</p>
 <p class="muted">订阅链接（每人专属，粘贴到客户端即可）：</p>
 <div class="sub-row"><span class="lbl">订阅链接</span><code id="subAuto"></code><button type="button" id="btnCopyAuto">复制</button></div>
@@ -1799,7 +1814,6 @@ code{word-break:break-all;background:rgba(0,0,0,.4);padding:2px 7px;border-radiu
 <p class="muted" id="shareInfo"></p>
 <div class="actions"><button type="button" id="btnImport">一键导入 sing-box</button> <button type="button" class="ghost" id="btnRefresh">刷新流量</button> <button type="button" class="ghost" id="btnRotate">刷新订阅链接（旧链接立即失效）</button> <button type="button" class="ghost" id="btnDisable">停用订阅链接</button> <button type="button" class="ghost" id="btnLogout">退出登录</button></div>
 <p class="muted" id="copyMsg"></p></div>
-<div class="card"><h2>节点 · 总流量（探针）</h2><p class="muted" id="probeNote"></p><div class="table-scroll"><table><thead><tr><th>节点</th><th>状态 / 实时</th><th>今日</th><th>本月已用 / 限额</th><th>CPU / 运行</th></tr></thead><tbody id="nodeRows"></tbody></table></div></div>
 </div>
 </div><script>
 function applyTheme(t){document.documentElement.setAttribute("data-theme",t);var b=document.getElementById("btnTheme");if(b)b.textContent=t==="light"?"夜间模式":"白天模式";try{localStorage.setItem("emos-theme",t)}catch(e){}}
@@ -1807,6 +1821,7 @@ document.getElementById("btnTheme").onclick=function(){applyTheme(document.docum
 applyTheme(document.documentElement.getAttribute("data-theme")||"dark");
 var session=null,subUrls=null,importUrl="";
 function copyText(t,msg){if(navigator.clipboard){navigator.clipboard.writeText(t).then(function(){document.getElementById("copyMsg").textContent=msg||"已复制。"})}else{document.getElementById("copyMsg").textContent=t}}
+function fmtExpiry(v){if(!v)return '—';var d=new Date(v);if(isNaN(d.getTime()))return esc(v);var s=String(v).length>=10?String(v).slice(0,10):d.toISOString().slice(0,10);var days=Math.ceil((d.getTime()-Date.now())/86400000);if(days<0)return s+' <span class="pill bad">已过期</span>';if(days<=14)return s+' <span class="pill bad">剩 '+days+' 天</span>';return s+' <span class="muted">剩 '+days+' 天</span>';}
 function fmt(n){if(n==null)return "-";var u=["B","KB","MB","GB","TB"],i=0;while(n>=1024&&i<u.length-1){n/=1024;i++}return n.toFixed(n>=100?0:1)+" "+u[i]}
 function fmtSpeed(n){return fmt(n)+"/s"}
 function esc(s){return String(s==null?"":s).replace(/&/g,"&amp;").replace(/</g,"&lt;")}
@@ -1857,9 +1872,9 @@ async function loadNodes(){
     var bar=n.pct_used==null?"":"<div class=\\"bar\\"><i style=\\"width:"+Math.min(100,n.pct_used)+"\\"></i></div>";
     var up=n.uptime==null?"—":Math.floor(n.uptime/86400)+" 天";
     var pill=n.online===true?'<span class="pill ok">在线</span>':n.online===false?'<span class="pill bad">离线</span>':'<span class="pill">未知 · 不在探针里</span>';
-    html+="<tr><td><b>"+esc(n.name)+"</b><br><span class=\\"muted\\">"+esc(n.region)+" · 探针："+esc(n.probe_name)+" #"+n.probe_node_id+"</span></td><td>"+pill+"<br><span class=\\"muted\\">↑ "+fmtSpeed(n.net_tx)+" ↓ "+fmtSpeed(n.net_rx)+"</span></td><td>"+fmt(n.day_used)+"</td><td>"+fmt(n.month_used)+" / "+(n.traffic_limit?fmt(n.traffic_limit):"不限")+"<br><span class=\\"muted\\">已用 "+pct+" · 剩余 "+(n.remaining==null?"—":fmt(n.remaining))+"</span>"+bar+"</td><td>"+(n.cpu==null?"—":n.cpu.toFixed(1)+"%")+"<br><span class=\\"muted\\">"+up+"</span></td></tr>";
+    html+="<tr><td><b>"+esc(n.name)+"</b><br><span class=\\"muted\\">"+esc(n.region)+" · 探针："+esc(n.probe_name)+" #"+n.probe_node_id+"</span></td><td>"+fmtExpiry(n.expires_at)+"</td><td>"+pill+"<br><span class=\\"muted\\">↑ "+fmtSpeed(n.net_tx)+" ↓ "+fmtSpeed(n.net_rx)+"</span></td><td>"+fmt(n.day_used)+"</td><td>"+fmt(n.month_used)+" / "+(n.traffic_limit?fmt(n.traffic_limit):"不限")+"<br><span class=\\"muted\\">已用 "+pct+" · 剩余 "+(n.remaining==null?"—":fmt(n.remaining))+"</span>"+bar+"</td><td>"+(n.cpu==null?"—":n.cpu.toFixed(1)+"%")+"<br><span class=\\"muted\\">"+up+"</span></td></tr>";
   });
-  document.getElementById("nodeRows").innerHTML=html||"<tr><td colspan=\\"5\\">暂无节点</td></tr>";
+  document.getElementById("nodeRows").innerHTML=html||"<tr><td colspan=\\"6\\">暂无节点</td></tr>";
 }
 document.getElementById("btnToken").onclick=function(){var t=document.getElementById("token").value.trim();if(!t){showMsg("先粘贴 EMOS token");return}doAuth({token:t})};
 document.getElementById("btnCopyAuto").onclick=function(){if(subUrls)copyText(subUrls.c_url||subUrls.url,"已复制订阅链接。")};
