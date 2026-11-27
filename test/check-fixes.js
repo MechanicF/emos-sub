@@ -17,6 +17,7 @@ const mockEmos = http.createServer((req, res) => {
   }
   if (req.url.startsWith('/api/carrot/current')) {
     if (carrotMode === 'down') { res.writeHead(500); return res.end('{}'); }
+    if (carrotMode === 'unauth') { res.writeHead(401); return res.end('{}'); }
     res.writeHead(200, { 'Content-Type': 'application/json' });
     return res.end(JSON.stringify({ carrot: 999 }));
   }
@@ -52,6 +53,7 @@ const check = (name, cond, extra) => { if (cond) { console.log('OK   ' + name); 
   process.env.PROBE_URL = 'http://127.0.0.1:' + mockProbe.address().port + '/api/nodes';
   process.env.EMOS_STATE_FILE = path.join(tmp, 'state.json');
   process.env.CARROT_RECHECK_MS = '1000';
+  process.env.SHARE_TTL_HOURS = '0'; // v1.5.13 default: shares never expire
   process.env.CARROT_GRACE_MS = '1500';
   process.env.PROBE_FAIL_CACHE_MS = '1000';
   const lib = require(path.join(__dirname, '..', 'server.js'));
@@ -181,6 +183,49 @@ const check = (name, cond, extra) => { if (cond) { console.log('OK   ' + name); 
   check('ip-check reports the resolved client IP',
     diag.ok === true && diag.resolved === '203.0.113.42' && diag.source === 'x-real-ip',
     JSON.stringify(diag).slice(0, 160));
+
+  // 15. v1.5.13: the subscription link survives the login session.
+  // (2026-11-27 bug: the same link worked in client A, then every other
+  // client got 403 — the 24 h share TTL, the 24 h session TTL and the
+  // EMOS-token-death revoke all killed the link, and re-login minted a
+  // new token.)
+  const hh = await login('HHH');
+  check('new share never expires by default (share_ttl_hours=0)',
+    (await sharesOf(hh.user_id) || {}).expires_at === null);
+  // logout ends the console session only; the link keeps working
+  const loo = await req(port, 'POST', '/api/logout', { 'X-Session': hh.session }, {});
+  check('logout succeeds', loo.status === 200, 'got ' + loo.status);
+  check('link survives logout (no live session needed)',
+    (await sub(hh.sub_token)).status === 200);
+  // re-login reuses the same link instead of minting a new one
+  const hh2 = await login('HHH');
+  check('re-login keeps the same subscription token', hh2.ok && hh2.sub_token === hh.sub_token,
+    'old=' + (hh.sub_token || '').slice(0, 8) + ' new=' + (hh2.sub_token || '').slice(0, 8));
+  check('same link still serves after re-login', (await sub(hh2.sub_token)).status === 200);
+  // a dead EMOS token (401) is grace, not an instant revoke
+  carrotMode = 'unauth';
+  await sleep(1200); // past CARROT_RECHECK_MS (1000)
+  check('EMOS 401 is grace, not a revoke (link still serves)',
+    (await sub(hh2.sub_token)).status === 200);
+  await sleep(700); // past CARROT_GRACE_MS (1500) since login
+  check('link dies only after the grace window runs out',
+    (await sub(hh2.sub_token)).status === 403);
+  carrotMode = 'ok';
+  // a fresh login re-enables the same link (system-disabled shares revive)
+  const hh3 = await login('HHH');
+  check('re-login re-enables the same link after grace expiry',
+    hh3.ok && hh3.sub_token === hh.sub_token, 'got ' + (hh3.sub_token || '').slice(0, 8));
+  check('re-enabled link serves again', (await sub(hh3.sub_token)).status === 200);
+  // a user-disabled link stays dead across re-login (it may have leaked)
+  const ii = await login('III');
+  await req(port, 'POST', '/api/sub/disable', { 'X-Session': ii.session }, {});
+  const ii2 = await login('III');
+  check('re-login after user disable mints a fresh token',
+    ii2.ok && ii2.sub_token !== ii.sub_token);
+  check('user-disabled link stays 403 after re-login',
+    (await sub(ii.sub_token)).status === 403);
+  check('fresh link after user disable serves',
+    (await sub(ii2.sub_token)).status === 200);
 
   lib.server.close(); mockEmos.close(); mockProbe.close();
   try { fs.rmSync(tmp, { recursive: true, force: true }); } catch (e) { /* noop */ }

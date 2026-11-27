@@ -2,7 +2,7 @@
 
 EMOS 登录核验萝卜余额，**严格大于门槛（默认 500，可在后台改）**才能进控制台、领取每人专属的订阅链接。节点流量取自 1e.lol 探针的整机总流量，不做每人用量统计。
 
-当前版本：**v1.5.12**（2026-11-26，反代真实 IP 版）
+当前版本：**v1.5.13**（2026-11-27，订阅不断链版）
 
 零依赖 Node.js（Node ≥ 18），不用 `npm install`。单文件 `server.js` + `config/` + `manage.sh`。
 
@@ -78,7 +78,7 @@ PORT=3000 ADMIN_TOKEN=你的口令 node server.js
 
 支持 `hy2://`、`hysteria2://`、`vless://`（含 REALITY）。命名规则默认 `[$Flag] $LinkCountryName - $Name`，重名自动加序号。Clash 分流用 ACL4SSR AdblockPlus 规则（15 个 rule-providers + 11 个分组，`GEOIP,CN` 直连、`MATCH` 漏网之鱼），模板在 `config/templates/clash.yaml`。
 
-**FlClash 没节点先查三点：**① 用控制台那条唯一的订阅链接（不带 `client` 参数）；② token 有效期 24 小时，过期或刷新后旧链接失效，重新登录；③ 服务器端口放行，浏览器能打开订阅地址看到 YAML 才算通。
+**FlClash 没节点先查三点：**① 用控制台那条唯一的订阅链接（不带 `client` 参数）；② 链接默认永不过期（后台可设有效期），刷新 / 轮换后旧链接才失效；③ 服务器端口放行，浏览器能打开订阅地址看到 YAML 才算通。
 
 响应头带 `Subscription-Userinfo`（节点总流量，到期本月底 23:59），`Cache-Control: private, no-store`；Clash 另带 `profile-update-interval: 24`。反代须透传 User-Agent。探针拉取失败时用内置样本值兜底并注明。VLESS Encryption（`mlkem768x25519plus`）是 Xray 功能，原版 sing-box 可能导入失败，建议用 Xray 核心客户端。
 
@@ -90,7 +90,7 @@ PORT=3000 ADMIN_TOKEN=你的口令 node server.js
 | `ADMIN_TOKEN` | （必填） | 后台口令；未设后台返回 503 |
 | `PUBLIC_URL` | （空） | 公开域名，如 `https://sub.example.com`；订阅链接和 EMOS 回调都以它为准，生产配 HTTPS |
 | `CARROT_THRESHOLD` | 500 | 萝卜门槛，须严格大于此值 |
-| `SHARE_TTL_HOURS` | 24 | 分享有效期（小时），0 = 永不过期 |
+| `SHARE_TTL_HOURS` | 0 | 分享有效期（小时），0 = 永不过期 |
 | `PROBE_CACHE_SECONDS` | 30 | 探针缓存（秒） |
 | `EMOS_APP_NAME` | emos-sub | EMOS `/link` 登录页显示的应用名 |
 | `TRUST_PROXY` | auto | 是否信任转发头里的客户端 IP：`auto` 只信任本机/内网来源；`1` 总是信任；`0` 永不信任 |
@@ -114,8 +114,8 @@ PORT=3000 ADMIN_TOKEN=你的口令 node server.js
 
 - 后台口令：同一 IP 连错 5 次锁 15 分钟（第 6 次起 429），输对清零；比较用 `timingSafeEqual`。
 - 限流：`/api/auth` 和 EMOS 跳转每 IP 10 分钟 30 次；订阅端点每 IP 每分钟 120 次。
-- 萝卜掉下门槛立即吊销：订阅取用时最多 10 分钟核验一次；核验失败当场删会话和链接；EMOS 临时挂掉不断订阅，只推迟 60 秒再核验。
-- 每人一个有效登录，新登录吊销旧会话和旧链接；刷新订阅也要先核验萝卜。
+- 萝卜掉下门槛立即吊销：订阅取用时最多 10 分钟核验一次；核验失败当场停用链接（记录保留，重新登录可恢复同一条链接）；EMOS token 失效（401/403）或临时挂掉不断订阅，只进 24 小时宽限并推迟 60 秒再核验，宽限耗尽才停用。
+- 每人一个有效登录，新登录结束旧控制台会话，但订阅链接不变（重新登录复用同一条链接；自己或管理员停用的链接除外，重新登录会换新链接）。刷新订阅也要先核验萝卜。
 - EMOS 身份强制校验：`sign/check` 失败即拒绝登录，绝不再退化成共享的 `unknown` 用户（否则一人登录会踢掉所有人）。
 - 管理员吊销 / 停用后，用户**不能**靠「刷新订阅链接」自助复活，必须重新登录；管理员主动刷新或启用可恢复。
 - EMOS 故障时的 `stale` 宽限有硬上限（`CARROT_GRACE_MS`，默认 24 小时），超时强制吊销，不会无限续期。
@@ -201,11 +201,12 @@ curl -s -H 'X-Admin-Token: 你的口令' https://sub.example.com/api/admin/ip-ch
 
 ```bash
 node test/check-pages.js   # 启动真服务跑回归（76 项）：实发页面脚本校验、订阅结构、限流、吊销流程、重启落盘等
-node test/check-fixes.js   # v1.5.5 安全回归：身份绑定、吊销不可复活、门禁硬上限、XFP 白名单、413、探针标签、% 解析、事件委托
+node test/check-fixes.js   # 安全回归（37 项）：身份绑定、吊销不可复活、门禁硬上限、XFP 白名单、413、探针标签、% 解析、事件委托、反代 IP、订阅不断链（v1.5.13）
 ```
 
 ## 版本历史
 
+- **v1.5.13**：订阅不断链版 — 修“同一条链接 A 客户端更新后别的客户端 403”：分享默认永不过期（SHARE_TTL_HOURS 默认 0，原 24 小时）；链接不再绑定 24 小时登录会话（会话过期、退出登录都不杀链接）；重新登录复用同一条链接（系统停用的重新登录可恢复，用户/管理员停用的除外）；EMOS token 失效（401/403）改走 24 小时宽限而非立即吊销；宽限在每次取用时强制执行；后台分享表显示停用原因（用户/管理员/系统）；SESSION_TTL_MS 可配
 - **v1.5.12**：反代真实 IP 版 — 客户端 IP 从转发链右往左取（默认 1 级反代），伪造 XFF 前缀失效；支持 X-Real-IP / CF-Connecting-IP / True-Client-IP / Forwarded，`::ffff:` 与脏值规范化；新增 TRUST_PROXY_HOPS / TRUST_PROXY_IPS / CLIENT_IP_HEADER；后台「设置」Tab 加反代 IP 诊断（GET /api/admin/ip-check，需鉴权）；README 补 Nginx/Caddy 配置
 - **v1.5.11**：服务端首屏版 — 服务端按会话直接渲染控制台首屏（登录卡隐藏、萝卜/订阅链接已填好），已登录刷新不再闪登录界面；接口并行拉取，失效会话切回登录并提示；页面带 no-store 防代理串号
 - **v1.5.10**：去手动刷新版 — 删掉控制台「刷新流量」按钮，节点表本来就每 30 秒自动刷新

@@ -26,13 +26,13 @@ const crypto = require('crypto');
 const net = require('net');
 
 const PORT = parseInt(process.env.PORT || '3000', 10);
-const VERSION = '1.5.12';
+const VERSION = '1.5.13';
 const CONFIG_PATH = path.join(__dirname, 'config', 'nodes.json');
 const CLASH_TEMPLATE_PATH = path.join(__dirname, 'config', 'templates', 'clash.yaml');
 const SINGBOX_TEMPLATE_PATH = path.join(__dirname, 'config', 'templates', 'singbox.json');
 const PROBE_URL = process.env.PROBE_URL || 'https://1e.lol/api/nodes';
 const EMOS_BASE = process.env.EMOS_BASE || 'https://emos.best';
-const SESSION_TTL_MS = 24 * 60 * 60 * 1000;
+const SESSION_TTL_MS = Math.max(1000, parseInt(process.env.SESSION_TTL_MS || String(24 * 60 * 60 * 1000), 10) || 24 * 60 * 60 * 1000);
 const CARROT_RECHECK_MS = Math.max(1000, parseInt(process.env.CARROT_RECHECK_MS || '600000', 10) || 600000);
 // Hard cap on how long a link may be served while EMOS is unreachable.
 // Without it every failed re-check just postpones another 60 s, so a user
@@ -43,7 +43,7 @@ const CARROT_GRACE_MS = Math.max(1000, parseInt(process.env.CARROT_GRACE_MS || S
 // CARROT_THRESHOLD: strict, carrot must be > this. SHARE_TTL_HOURS: 0 = never.
 // PROBE_CACHE_SECONDS: how long the 1e.lol probe response is cached.
 let CARROT_THRESHOLD = 500;
-let SHARE_TTL_HOURS = 24;
+let SHARE_TTL_HOURS = 0; // 0 = never expires (v1.5.13: the old 24 h default killed every link a day after login)
 let PROBE_CACHE_MS = 30 * 1000;
 function shareTtlMs() {
   return Number.isFinite(SHARE_TTL_HOURS) && SHARE_TTL_HOURS > 0 ? SHARE_TTL_HOURS * 3600 * 1000 : null;
@@ -138,6 +138,11 @@ function createShare(sessionId, userId) {
     created_at: now,
     expires_at: ttl ? now + ttl : null,
     enabled: true, access_count: 0, last_ip: null, last_user_agent: null, last_access_at: null,
+    // v1.5.13: the carrot gate lives on the share, not on the 24 h login
+    // session. emosToken is the EMOS token used for re-checks;
+    // lastCarrotCheck/lastCarrotOkAt drive the 10 min re-check + 24 h grace;
+    // disabledBy is null | 'user' | 'admin' | 'system' (who disabled it).
+    emosToken: null, carrot: null, lastCarrotCheck: now, lastCarrotOkAt: now, disabledBy: null,
   };
   shares.set(token, share);
   return share;
@@ -306,15 +311,17 @@ function adminLoginFail(ip) {
 }
 // Hourly sweep: expired sessions/shares/admin sessions used to be deleted
 // only on access, so a session that is never used again sat in memory
-// forever (slow memory leak + stale shares pointing at dead sessions).
+// forever (slow memory leak). v1.5.13: shares are NOT deleted when their
+// session expires — the link outlives the 24 h console login; only a share
+// past its own expires_at is pruned.
 setInterval(() => {
   let pruned = false;
   const now = Date.now();
   for (const [sid, s] of sessions) {
-    if (now > s.expiresAt) { pruned = true; sessions.delete(sid); if (s.shareToken) shares.delete(s.shareToken); }
+    if (now > s.expiresAt) { pruned = true; sessions.delete(sid); }
   }
   for (const [tok, s] of shares) {
-    if ((s.expires_at && now > s.expires_at) || !sessions.has(s.sessionId)) { pruned = true; shares.delete(tok); }
+    if (s.expires_at && now > s.expires_at) { pruned = true; shares.delete(tok); }
   }
   for (const [sid, s] of adminSessions) if (now > s.expiresAt) { pruned = true; adminSessions.delete(sid); }
   for (const [k, v] of rateLimits) if (now > v.resetAt) rateLimits.delete(k);
@@ -425,8 +432,30 @@ function loadState() {
       sessions.set(sid, s);
     }
     for (const [tok, s] of doc.shares) {
-      if (typeof tok !== 'string' || !s || typeof s !== 'object' || typeof s.sessionId !== 'string' || !sessions.has(s.sessionId)) continue;
+      if (typeof tok !== 'string' || !s || typeof s !== 'object') continue;
       if (s.expires_at && now > s.expires_at) continue;
+      // v1.5.13: shares outlive login sessions, so a share no longer needs
+      // a live session to load. Backfill the carrot-check fields from its
+      // session when available (pre-1.5.13 state files); otherwise the share
+      // serves during the grace window only, until the user logs in again.
+      if (typeof s.emosToken !== 'string' || !s.emosToken) {
+        const sess = typeof s.sessionId === 'string' ? sessions.get(s.sessionId) : null;
+        if (sess && typeof sess.emosToken === 'string' && sess.emosToken) {
+          s.emosToken = sess.emosToken;
+          s.lastCarrotCheck = typeof sess.lastCarrotCheck === 'number' ? sess.lastCarrotCheck : now;
+          s.lastCarrotOkAt = typeof sess.lastCarrotOkAt === 'number' ? sess.lastCarrotOkAt : now;
+          if (typeof sess.carrot === 'number') s.carrot = sess.carrot;
+        } else {
+          s.emosToken = null;
+          s.lastCarrotCheck = 0;
+          s.lastCarrotOkAt = now;
+        }
+      }
+      if (typeof s.lastCarrotCheck !== 'number') s.lastCarrotCheck = 0;
+      if (typeof s.lastCarrotOkAt !== 'number') s.lastCarrotOkAt = now;
+      // A disabled share with no recorded reason is treated as user-disabled
+      // (stays dead on re-login); only 'system' shares are re-enabled.
+      if (typeof s.disabledBy !== 'string') s.disabledBy = s.enabled ? null : 'user';
       shares.set(tok, s);
     }
     for (const [sid, s] of doc.adminSessions) {
@@ -481,7 +510,7 @@ function maskToken(t) {
   return t.slice(0, 6) + '…';
 }
 function adminShareInfo(s) {
-  return { id: s.id || null, token_masked: maskToken(s.token), user_id: s.user_id, created_at: s.created_at, expires_at: s.expires_at, enabled: s.enabled, access_count: s.access_count, last_ip: normalizeIp(s.last_ip) || s.last_ip, last_user_agent: s.last_user_agent, last_access_at: s.last_access_at };
+  return { id: s.id || null, token_masked: maskToken(s.token), user_id: s.user_id, created_at: s.created_at, expires_at: s.expires_at, enabled: s.enabled, disabled_by: s.disabledBy || null, access_count: s.access_count, last_ip: normalizeIp(s.last_ip) || s.last_ip, last_user_agent: s.last_user_agent, last_access_at: s.last_access_at };
 }
 function findShareByRef(ref) {
   if (!ref) return null;
@@ -1351,15 +1380,40 @@ async function emosSignCheck(token) {
 // Shared by POST /api/auth (manual token / demo) and the /link callback —
 // do not duplicate this logic. Never logs or renders the EMOS token.
 function issueUserSession(req, result, token, demo) {
-  // One live session per user_id: a fresh login revokes the previous one
-  // (and its subscription link). Before this, every re-login minted an
-  // extra permanently-valid link, so "one link per person" was not true.
+  // One live console session per user_id: a fresh login ends the previous
+  // console session. The subscription link is NOT revoked (v1.5.13): before
+  // this, every re-login minted a new share token, so every client holding
+  // the old URL got 403.
   for (const [sid, s] of sessions) {
-    if (s.user_id === result.user_id) { sessions.delete(sid); if (s.shareToken) shares.delete(s.shareToken); }
+    if (s.user_id === result.user_id) sessions.delete(sid);
   }
   const sessionId = randHex(16);
   const now = Date.now();
-  const share = createShare(sessionId, result.user_id);
+  // Reuse the user's existing share so the distributed link never changes
+  // on re-login. A system-disabled share (carrot drop / grace expiry) is
+  // re-enabled: this login just proved the carrot is above the threshold
+  // again. A user- or admin-disabled share stays dead (it may have leaked);
+  // a fresh share is minted instead. Stale duplicates are dropped: one
+  // live link per person.
+  let share = null;
+  for (const s of shares.values()) {
+    if (s.user_id !== result.user_id) continue;
+    if (!share || (s.created_at || 0) > (share.created_at || 0)) share = s;
+  }
+  for (const s of [...shares.values()]) {
+    if (s.user_id === result.user_id && s !== share) shares.delete(s.token);
+  }
+  if (share && !share.enabled && share.disabledBy !== 'system') {
+    shares.delete(share.token);
+    share = null;
+  }
+  if (share && !share.enabled) { share.enabled = true; share.disabledBy = null; }
+  if (!share) share = createShare(sessionId, result.user_id);
+  share.sessionId = sessionId;
+  share.emosToken = token || null;
+  share.lastCarrotCheck = now;
+  share.lastCarrotOkAt = now;
+  share.carrot = result.carrot;
   const subToken = share.token;
   sessions.set(sessionId, { user_id: result.user_id, username: result.username, carrot: result.carrot, emosToken: token || null, demo, expiresAt: now + SESSION_TTL_MS, lastCarrotCheck: now, lastCarrotOkAt: now, shareToken: subToken });
   saveStateNow();
@@ -1486,9 +1540,11 @@ function handleSubLink(req, res) {
 // POST /api/logout — end the current user session (cookie and/or X-Session)
 // and clear the emos_session cookie. Added 2026-11-26: the console hides the
 // login card once the dashboard shows, so users need a way back out.
+// v1.5.13: logout ends only the console session; the share survives, so
+// logging out must not 403 every client holding the link.
 function handleLogout(req, res) {
   const s = getSession(req);
-  if (s) { sessions.delete(s.sid); if (s.shareToken) shares.delete(s.shareToken); }
+  if (s) { sessions.delete(s.sid); }
   saveStateNow();
   res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Set-Cookie': 'emos_session=; HttpOnly; Path=/; Max-Age=0; SameSite=Lax' + cookieSecure(req), ...securityHeaders() });
   return res.end(JSON.stringify({ ok: true }));
@@ -1504,17 +1560,23 @@ async function handleSubRefresh(req, res) {
   // single revoke, or the user's own disable). Only a fresh EMOS login may
   // mint a new link; self-service refresh must not undo a revocation.
   if (!sess.shareToken) return sendJson(res, 403, { ok: false, error: 'subscription revoked or disabled — please log in again' });
-  // Rotating must not bypass the gate: an admin-disabled share, or a carrot
-  // that dropped since login, must not mint a fresh link without a live
-  // EMOS check. (Re-login does the same check; refresh is no cheaper.)
-  if (sess.emosToken && Date.now() - sess.lastCarrotCheck > CARROT_RECHECK_MS) {
-    const verdict = await recheckCarrot(s.sid, sess);
-    if (verdict === 'revoked') return sendJson(res, 403, { ok: false, error: 'carrot dropped below ' + CARROT_THRESHOLD + ' (or EMOS token invalid) — please log in again' });
-    if (!sessions.get(s.sid)) return sendJson(res, 401, { ok: false, error: 'session ended — please log in again' });
+  const old = shares.get(sess.shareToken);
+  if (!old || !old.enabled) return sendJson(res, 403, { ok: false, error: 'subscription revoked or disabled — please log in again' });
+  // Rotating must not bypass the gate: a carrot that dropped since login
+  // must not mint a fresh link without a live EMOS check. (Re-login does
+  // the same check; refresh is no cheaper.) The check runs on the share
+  // (v1.5.13); the session's cached carrot is synced for the console.
+  if (old.emosToken && Date.now() - (old.lastCarrotCheck || 0) > CARROT_RECHECK_MS) {
+    const verdict = await recheckCarrot(old);
+    if (verdict === 'revoked') return sendJson(res, 403, { ok: false, error: 'carrot dropped below ' + CARROT_THRESHOLD + ' (or EMOS unreachable too long) — please log in again' });
+    if (typeof old.carrot === 'number') { sess.carrot = old.carrot; sess.lastCarrotCheck = old.lastCarrotCheck; sess.lastCarrotOkAt = old.lastCarrotOkAt; }
   }
-  const old = shares.get(s.shareToken);
-  if (old) { old.enabled = false; shares.delete(s.shareToken); }
+  old.enabled = false; shares.delete(sess.shareToken);
   const share = createShare(s.sid, s.user_id);
+  share.emosToken = old.emosToken || sess.emosToken || null;
+  share.carrot = old.carrot ?? null;
+  share.lastCarrotCheck = old.lastCarrotCheck || Date.now();
+  share.lastCarrotOkAt = old.lastCarrotOkAt || Date.now();
   sess.shareToken = share.token;
   saveStateNow();
   const urls = subUrls(req, share.token);
@@ -1528,66 +1590,68 @@ function handleSubDisable(req, res) {
   if (!s) return sendJson(res, 401, { ok: false, error: 'missing or expired X-Session — login first' });
   const sess = sessions.get(s.sid);
   const share = shares.get(s.shareToken);
-  if (share) share.enabled = false;
+  if (share) { share.enabled = false; share.disabledBy = 'user'; }
   if (sess) sess.shareToken = null; // refresh must not resurrect a disabled link
   saveStateNow();
   return sendJson(res, 200, { ok: true, user_id: s.user_id, disabled: true, share: shareInfo(share) });
 }
 
-// Carrot re-check for a live session. Returns:
+// Carrot re-check for a share. Returns:
 //   'ok'      — EMOS confirms carrot still > threshold (fresh for 10 min)
-//   'revoked' — carrot dropped, or the EMOS token is dead (401/403):
-//               the whole session + share are deleted, caller must 403.
-//   'stale'   — EMOS unreachable / 5xx this time: serve this one request,
-//               retry soon (60 s) instead of failing every subscription
-//               fetch for the whole EMOS outage.
+//   'revoked' — carrot PROVEN below threshold, or the grace period ran out
+//               with no successful check: the share is disabled (kept, so a
+//               fresh login can re-enable the same link).
+//   'stale'   — EMOS unreachable, or the token is dead (401/403), this time:
+//               serve this one request, retry soon (60 s). A dead token does
+//               NOT prove the user lost their carrot — EMOS tokens expire,
+//               so treating 401 as a revoke killed every link a day after
+//               login (v1.5.13). Only the grace cap still revokes.
 // (2026-11-26 audit) The old code set lastCarrotCheck BEFORE the threshold
 // test, so one failed re-check granted 10 more minutes of free serving.
-async function recheckCarrot(sid, sess) {
+async function recheckCarrot(share) {
   try {
-    const carrot = await emosCarrotOnly(sess.emosToken);
-    sess.carrot = carrot;
+    const carrot = await emosCarrotOnly(share.emosToken);
+    share.carrot = carrot;
     if (!(carrot > CARROT_THRESHOLD)) {
-      sessions.delete(sid);
-      if (sess.shareToken) shares.delete(sess.shareToken);
-      saveStateNow();
+      share.enabled = false; share.disabledBy = 'system'; saveStateNow();
       return 'revoked';
     }
-    sess.lastCarrotCheck = Date.now();
-    sess.lastCarrotOkAt = Date.now();
+    share.lastCarrotCheck = Date.now();
+    share.lastCarrotOkAt = Date.now();
     return 'ok';
   } catch (e) {
-    if (/HTTP 40[13]/.test(e.message || '')) {
-      sessions.delete(sid);
-      if (sess.shareToken) shares.delete(sess.shareToken);
-      saveStateNow();
-      return 'revoked';
-    }
-    const lastOk = sess.lastCarrotOkAt || sess.lastCarrotCheck || 0;
+    const lastOk = share.lastCarrotOkAt || share.lastCarrotCheck || 0;
     if (Date.now() - lastOk > CARROT_GRACE_MS) {
-      console.error('Carrot grace period exceeded, revoking session');
-      sessions.delete(sid);
-      if (sess.shareToken) shares.delete(sess.shareToken);
-      saveStateNow();
+      console.error('Carrot grace period exceeded, disabling share');
+      share.enabled = false; share.disabledBy = 'system'; saveStateNow();
       return 'revoked';
     }
     console.error('Carrot re-check failed (transient, retry in 60s):', e.message);
-    sess.lastCarrotCheck = Date.now() - CARROT_RECHECK_MS + 60 * 1000;
+    share.lastCarrotCheck = Date.now() - CARROT_RECHECK_MS + 60 * 1000;
     return 'stale';
   }
 }
 
-// Resolve a subscription token to its session, enforcing share + session
-// expiry and the EMOS carrot re-check for real sessions.
+// Resolve a subscription token, enforcing share expiry and the EMOS carrot
+// re-check. v1.5.13: the link is NOT tied to a login session — a session
+// lasts 24 h, but the subscription must survive it. The carrot gate is
+// enforced by the periodic re-check on the share itself.
 async function resolveShare(req, res, token) {
   const share = getShare(token);
   if (!share) { sendJson(res, 403, { ok: false, error: 'invalid, disabled or expired subscription token' }); return null; }
-  const sess = sessions.get(share.sessionId);
-  if (!sess || Date.now() > sess.expiresAt) { shares.delete(token); saveStateNow(); sendJson(res, 403, { ok: false, error: 'subscription expired' }); return null; }
-  // Re-check carrot for real EMOS sessions (cached 10 min). Demo sessions skip.
-  if (sess.emosToken && Date.now() - sess.lastCarrotCheck > CARROT_RECHECK_MS) {
-    const verdict = await recheckCarrot(share.sessionId, sess);
-    if (verdict === 'revoked') { sendJson(res, 403, { ok: false, error: 'carrot dropped below ' + CARROT_THRESHOLD + ' (or EMOS token invalid) — subscription revoked, please log in again' }); return null; }
+  // Grace is enforced on every fetch, not only at re-check time: once the
+  // last successful check is older than CARROT_GRACE_MS, the link dies even
+  // if the next re-check is still backed off (60 s after a transient fail).
+  if (Date.now() - (share.lastCarrotOkAt || 0) > CARROT_GRACE_MS) {
+    share.enabled = false; share.disabledBy = 'system'; saveStateNow();
+    sendJson(res, 403, { ok: false, error: 'subscription needs re-login — EMOS unreachable too long, please log in again' }); return null;
+  }
+  // Re-check carrot for real EMOS shares (cached 10 min). Shares without a
+  // token (migrated from a dead session, or demo) skip the live check and
+  // are bounded by the grace window above.
+  if (share.emosToken && Date.now() - (share.lastCarrotCheck || 0) > CARROT_RECHECK_MS) {
+    const verdict = await recheckCarrot(share);
+    if (verdict === 'revoked') { sendJson(res, 403, { ok: false, error: 'carrot dropped below ' + CARROT_THRESHOLD + ' (or EMOS unreachable too long) — subscription revoked, please log in again' }); return null; }
     // 'ok' or 'stale': serve this request.
   }
   // Access log (sublinkPro per-link access count + IP logs).
@@ -1596,7 +1660,7 @@ async function resolveShare(req, res, token) {
   share.last_user_agent = req.headers['user-agent'] || null;
   share.last_access_at = Date.now();
   markStateDirty();
-  return { share, sess };
+  return { share };
 }
 
 async function serveSubscription(req, res, token) {
@@ -1823,12 +1887,17 @@ async function handleAdminApi(req, res) {
     if (action === 'refresh') {
       shares.delete(s.token);
       const ns = createShare(s.sessionId, s.user_id);
+      ns.emosToken = s.emosToken || null;
+      ns.carrot = s.carrot ?? null;
+      ns.lastCarrotCheck = s.lastCarrotCheck || 0;
+      ns.lastCarrotOkAt = s.lastCarrotOkAt || Date.now();
       const sess = sessions.get(s.sessionId);
       if (sess) sess.shareToken = ns.token;
       saveStateNow();
       return sendJson(res, 200, { ok: true, share: adminShareInfo(ns), note: 'old token is invalid immediately' });
     }
     s.enabled = action === 'enable';
+    s.disabledBy = action === 'enable' ? null : 'admin';
     const sess = sessions.get(s.sessionId);
     if (sess) {
       if (action === 'enable' && !sess.shareToken) sess.shareToken = s.token;
@@ -2172,7 +2241,7 @@ async function loadShares(){
   if(r.status!==200)return;
   var h='';
   r.json.shares.forEach(function(s){
-    h+='<tr><td><code>'+esc(s.token_masked)+'</code></td><td><code>'+esc(s.user_id)+'</code></td><td>'+fmtTime(s.created_at)+'<br><span class="muted">到期：'+fmtTime(s.expires_at)+'</span></td><td>'+(s.enabled?'<span class="pill ok">启用</span>':'<span class="pill bad">停用</span>')+'</td><td>'+s.access_count+' 次</td><td>'+esc(s.last_ip||'—')+'<br><span class="muted">'+fmtTime(s.last_access_at)+'</span></td><td><button type="button" data-act="refresh" data-id="'+esc(s.id)+'">刷新</button> '+(s.enabled?'<button type="button" class="ghost" data-act="disable" data-id="'+esc(s.id)+'">停用</button>':'<button type="button" class="ghost" data-act="enable" data-id="'+esc(s.id)+'">启用</button>')+' <button type="button" class="danger" data-act="revoke" data-id="'+esc(s.id)+'">吊销</button></td></tr>';
+    h+='<tr><td><code>'+esc(s.token_masked)+'</code></td><td><code>'+esc(s.user_id)+'</code></td><td>'+fmtTime(s.created_at)+'<br><span class="muted">到期：'+fmtTime(s.expires_at)+'</span></td><td>'+(s.enabled?'<span class="pill ok">启用</span>':'<span class="pill bad">停用' + (s.disabled_by === 'user' ? '（用户）' : s.disabled_by === 'admin' ? '（管理员）' : s.disabled_by === 'system' ? '（系统）' : '') + '</span>')+'</td><td>'+s.access_count+' 次</td><td>'+esc(s.last_ip||'—')+'<br><span class="muted">'+fmtTime(s.last_access_at)+'</span></td><td><button type="button" data-act="refresh" data-id="'+esc(s.id)+'">刷新</button> '+(s.enabled?'<button type="button" class="ghost" data-act="disable" data-id="'+esc(s.id)+'">停用</button>':'<button type="button" class="ghost" data-act="enable" data-id="'+esc(s.id)+'">启用</button>')+' <button type="button" class="danger" data-act="revoke" data-id="'+esc(s.id)+'">吊销</button></td></tr>';
   });
   document.getElementById('shareRows').innerHTML=h||'<tr><td colspan="7"><div class="empty">暂无分享 · 用户首次登录后自动出现</div></td></tr>';
 }
