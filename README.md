@@ -2,7 +2,7 @@
 
 EMOS 登录核验萝卜余额，**严格大于门槛（默认 500，可在后台改）**才能进控制台、领取每人专属的订阅链接。节点流量取自 1e.lol 探针的整机总流量，不做每人用量统计。
 
-当前版本：**v1.5.27**（2026-11-28，出口 IP 走代理修复版）
+当前版本：**v1.5.28**（2026-11-28，IPQuality 风格解锁检测版）
 
 零依赖 Node.js（Node ≥ 18），不用 `npm install`。`server.js` + `unlock.js`（解锁探测）+ `config/` + `manage.sh`。解锁检测需要额外的 mihomo 二进制（见下）。
 
@@ -42,11 +42,11 @@ PORT=3000 ADMIN_TOKEN=你的口令 node server.js
 
 `update` 只更新代码文件，`.env` 和 `config/`（节点、设置）原样保留，更新前自动备份到 `backups/`（只留最近 10 个，权限 0600）。节点模板 `config/nodes.example.json` 随代码更新，真实 `nodes.json` 不参与版本控制。完整命令见 `./manage.sh help`。旧版 `manage.sh` 的 `update` 若报 `There is no tracking information`，先用 `curl -fsSL https://raw.githubusercontent.com/MechanicF/emos-sub/main/manage.sh -o manage.sh && chmod +x manage.sh && ./manage.sh update` 换新版再跑。
 
-## 节点解锁检测（v1.5.15）
+## 节点解锁检测（v1.5.28）
 
-参考 [ZeroDeng01/sublinkPro](https://github.com/ZeroDeng01/sublinkPro) 的解锁检测实现，控制台节点表新增「解锁」列：点「解锁」展开该节点当前 7 项服务的可用状态（Netflix / Disney+ / YouTube Premium / OpenAI / Gemini / Claude / 巴哈姆特动画疯），带地区码与状态色标。
+参考 [xykt/IPQuality](https://github.com/xykt/IPQuality) 的解锁检测实现，控制台节点表新增「解锁」列：点「解锁」展开该节点的 3 行 × 7 列表格（服务商 / 状态 / 地区）。7 项服务：TikTok / Disney+ / Netflix / Youtube / AmazonPV / Reddit / ChatGPT。失败原因在状态格内小字显示（手机上也能看到）。
 
-**原理**：用独立的 mihomo 二进制为每个节点建立真实代理连接，从该出口发服务级探针，判定逻辑移植自 sublinkPro 的 `services/unlock/`。结果按节点 `key` 缓存到 `config/unlock.json`（0600、git 忽略），**每 24 小时后台全量刷新一次**，服务启动时也会延迟触发一次首检。控制台读的是缓存，不实时打节点，所以展开是秒开。
+**原理**：用独立的 mihomo 二进制为每个节点建立真实代理连接，从该出口发服务级探针，判定逻辑移植自 IPQuality 的 `ip.sh`。结果按节点 `key` 缓存到 `config/unlock.json`（0600、git 忽略），**每 24 小时后台全量刷新一次**，服务启动时也会延迟触发一次首检。控制台读的是缓存，不实时打节点，所以展开是秒开。
 
 **启用步骤**：
 
@@ -231,11 +231,12 @@ curl -s -H 'X-Admin-Token: 你的口令' https://sub.example.com/api/admin/ip-ch
 
 ```bash
 node test/check-pages.js   # 启动真服务跑回归（76 项）：实发页面脚本校验、订阅结构、限流、吊销流程、重启落盘等
-node test/check-fixes.js   # 安全回归（92 项）：身份绑定、吊销不可复活、门禁硬上限、XFP 白名单、413、探针标签、% 解析、事件委托、反代 IP、订阅不断链（v1.5.13）、会话过期不删分享 + 重登刷新过期分享（v1.5.14）、解锁链接解析/配置生成/接口鉴权/CONNECT 隧道（v1.5.15）、开关与立即检测（v1.5.16）、mihomo -f 参数防退化（v1.5.17）、解锁控制仅管理员可调（v1.5.18）、解锁检测进度与 -t 超时（v1.5.19）、探针永不卡死（v1.5.20）、解锁异常显示原因（v1.5.21）、解锁出口 IP（v1.5.22）、mihomo 启动重试（v1.5.23）、出口 IP 打码与按节点取 IP（v1.5.24）、每节点独立 mihomo（v1.5.25）、服务器直连 IP 基线（v1.5.26）、HTTPS 请求经 CONNECT 隧道（v1.5.27）
+node test/check-fixes.js   # 安全回归（92 项）：身份绑定、吊销不可复活、门禁硬上限、XFP 白名单、413、探针标签、% 解析、事件委托、反代 IP、订阅不断链（v1.5.13）、会话过期不删分享 + 重登刷新过期分享（v1.5.14）、解锁链接解析/配置生成/接口鉴权/CONNECT 隧道（v1.5.15）、开关与立即检测（v1.5.16）、mihomo -f 参数防退化（v1.5.17）、解锁控制仅管理员可调（v1.5.18）、解锁检测进度与 -t 超时（v1.5.19）、探针永不卡死（v1.5.20）、解锁异常显示原因（v1.5.21）、解锁出口 IP（v1.5.22）、mihomo 启动重试（v1.5.23）、出口 IP 打码与按节点取 IP（v1.5.24）、每节点独立 mihomo（v1.5.25）、服务器直连 IP 基线（v1.5.26）、HTTPS 请求经 CONNECT 隧道（v1.5.27）、IPQuality 风格解锁检测（v1.5.28）
 ```
 
 ## 版本历史
 
+- **v1.5.28**：IPQuality 风格解锁检测版 — 探测项换成 TikTok / Disney+ / Netflix / Youtube / AmazonPV / Reddit / ChatGPT（参考 xykt/IPQuality 的 ip.sh），移除 Gemini / Claude / 巴哈姆特；节点展开改为 3 行 × 7 列表格（服务商 / 状态 / 地区）。失败原因在状态格内小字显示；AmazonPV 按地区优先判定、Reddit 只认 200、ChatGPT 加 favicon 二次确认。DNS「原生 / DNS」判定已移除（只反映服务器自己的解析器，各节点相同，无区分意义）。
 - **v1.5.27**：出口 IP 走代理修复版 — 修复所有节点出口 IP 都等于服务器直连 IP 的根因：probeRequest 用 https.request({createConnection, agent:false}) 发起 HTTPS 请求，该写法在部分 Node 版本上会忽略隧道、另开直连 socket（CONNECT 建了但请求没走代理）。改为 CONNECT 后显式 tls.connect({socket: tunnel})， inner HTTP 用专用 Agent 绑定该 wire socket；补回归断言「HTTPS 请求必须经 CONNECT 隧道」。
 - **v1.5.26**：直连 IP 诊断版 — v1.5.25 每节点独立 mihomo 后，Simon 实测出口 IP 还是全相同，说明问题不在 select 切组。每轮检测前先直连（不走任何代理）取一次服务器自己的出口 IP 存为基线，节点出口 IP 与它相等就判定为「走了服务器直连」，控制台该节点 IP 后面直接标「与服务器直连 IP 相同，可能未走节点」；后台 /admin 额外显示每个节点的完整出口 IP 和服务器直连 IP，方便逐个比对（控制台仍只显示打码 IP）
 - **v1.5.25**：每节点独立 mihomo 版 — Simon 实测 10 个节点出口 IP 全是 `209.205.228.*`，也就是服务器自己（Nuyek）的 IP，说明流量根本没走节点，全走了服务器直连。根因是共用一个 mihomo + select 切组不可靠。改成每个节点单独起一个 mihomo，配置里只有它自己那一个代理，流量只能走它自己，不可能再串到别的节点或直连。代价是每节点多一次 mihomo 启动，整轮会慢几秒。出口 IP 打码也按要求改成隐藏两位：IPv4 只留前两段（`209.205.*.*`），IPv6 只留前两组

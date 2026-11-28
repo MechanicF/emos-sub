@@ -1,4 +1,4 @@
-// EMOS-gated sing-box gateway v1.5.27 — zero dependencies.
+// EMOS-gated sing-box gateway v1.5.28 — zero dependencies.
 // Node >= 18 (uses global fetch). Run: node server.js  (PORT env, default 3000)
 // Scope: EMOS login -> carrot > 500 -> console (nodes + per-user sub links)
 // + NODE TOTAL traffic only, from https://1e.lol/api/nodes. NO per-user traffic.
@@ -28,7 +28,7 @@ const net = require('net');
 const unlockLib = require('./unlock');
 
 const PORT = parseInt(process.env.PORT || '3000', 10);
-const VERSION = '1.5.27';
+const VERSION = '1.5.28';
 const CONFIG_PATH = path.join(__dirname, 'config', 'nodes.json');
 const CLASH_TEMPLATE_PATH = path.join(__dirname, 'config', 'templates', 'clash.yaml');
 const SINGBOX_TEMPLATE_PATH = path.join(__dirname, 'config', 'templates', 'singbox.json');
@@ -2159,6 +2159,13 @@ h1,h2,h3{font-weight:500}
 .bad{color:var(--negative)}.ok{color:var(--positive)}.warn{color:var(--warning)}
 .unlock-controls{display:flex;gap:8px;flex-wrap:wrap}
 .unlock-controls button{padding:8px 12px;font-size:12px}
+.unlock-table{display:grid;grid-template-columns:76px repeat(var(--cols),minmax(72px,1fr));gap:4px 8px;align-items:center;font-size:12px;font-family:var(--mono);max-width:100%;overflow-x:auto;padding-bottom:2px}
+.unlock-table .ut-label{color:var(--muted);white-space:nowrap;padding-right:6px}
+.unlock-table .ut-name{color:var(--text);font-weight:600;text-align:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.unlock-table .ut-cell{text-align:center;color:var(--text-2);white-space:nowrap}
+.unlock-table .ut-cell.ok{color:var(--positive)}
+.unlock-table .ut-cell.bad{color:var(--negative)}
+.unlock-table .ut-cell.warn{color:var(--warning)}
 .unlock-tags{display:flex;flex-wrap:wrap;gap:6px}
 .utag{display:inline-flex;align-items:center;gap:5px;font-size:11px;font-family:var(--mono);padding:3px 8px;border-radius:999px;border:1px solid var(--line);background:var(--raised);color:var(--text-2);white-space:nowrap}
 .utag.available{color:var(--positive);border-color:var(--positive)}
@@ -2656,23 +2663,32 @@ function renderGate(j){
 }
 var unlockState={results:{},providers:[],enabled:false,updatedAt:null,lastError:null};
 var expanded={}; // node key -> bool
-var STATUS_LABEL={available:"解锁",partial:"部分",restricted:"受限",unsupported:"不支持",unknown:"未知",error:"异常",untested:"未测"};
+var STATUS_LABEL={available:"解锁",unlocked:"解锁",partial:"部分",restricted:"屏蔽",blocked:"屏蔽",unsupported:"不支持",failed:"失败",unknown:"未知",error:"异常",untested:"未测"};
+var PROVIDER_LABEL={tiktok:"TikTok",disney:"Disney+",netflix:"Netflix",youtube_premium:"Youtube",amazonpv:"AmazonPV",reddit:"Reddit",chatgpt:"ChatGPT"};
 function unlockTagsHtml(key){
   var d=unlockState.results[key];
   if(!d)return '<span class=\\"unlock-empty\\">暂无解锁数据</span>';
   if(d.error)return '<span class=\\"utag error\\">检测失败：'+esc(d.error)+'</span>';
   if(!d.providers)return '<span class=\\"unlock-empty\\">暂无解锁数据</span>';
+  var order=unlockState.providers||Object.keys(d.providers);
   var h='';
-  if(d.ip)h+='<div class=\\"muted\\" style=\\"margin-bottom:6px\\">出口 IP：'+esc(d.ip)+(d.direct?'（与服务器直连 IP 相同，可能未走节点）':'')+'</div>';
-  h+='<div class=\\"unlock-tags\\">';
-  unlockState.providers.forEach(function(prov){
-    var r=d.providers[prov]||{status:"untested"};
+  if(d.ip)h+='<div class=\\"muted\\" style=\\"margin-bottom:10px\\">出口 IP：'+esc(d.ip)+(d.direct?'（与服务器直连 IP 相同，可能未走节点）':'')+'</div>';
+  h+='<div class=\\"unlock-table\\" style=\\"--cols:'+order.length+'\\">';
+  // Row 1: provider names
+  h+='<div class=\\"ut-label\\">服务商：</div>';
+  order.forEach(function(p){h+='<div class=\\"ut-name\\">'+esc(PROVIDER_LABEL[p]||p)+'</div>';});
+  // Row 2: status
+  h+='<div class=\\"ut-label\\">状态：</div>';
+  order.forEach(function(p){
+    var r=d.providers[p]||{};
     var st=r.status||"untested";
-    h+='<span class=\\"utag '+esc(st)+'\\" title=\\"'+esc(prov)+'\\"><b>'+esc(prov)+'</b> '+esc(STATUS_LABEL[st]||st);
-    if(r.region)h+=' <small>'+esc(r.region)+'</small>';
-    if((st==='error'||st==='unknown')&&r.reason)h+=' <small>'+esc(r.reason)+'</small>';
-    h+='</span>';
+    var cls=(st==='available'||st==='unlocked')?'ok':((st==='blocked'||st==='restricted'||st==='failed'||st==='error')?'bad':'warn');
+    var rsn=(r.reason||r.detail||'');
+    h+='<div class=\\"ut-cell '+cls+'\\" title=\\"'+esc(rsn)+'\\">'+esc(STATUS_LABEL[st]||st)+(rsn?'<br><small>'+esc(rsn)+'</small>':'')+'</div>';
   });
+  // Row 3: region
+  h+='<div class=\\"ut-label\\">地区：</div>';
+  order.forEach(function(p){var r=d.providers[p]||{};h+='<div class=\\"ut-cell\\">'+(r.region?'['+esc(r.region)+']':'')+'</div>';});
   return h+'</div>';
 }
 function toggleUnlock(key){

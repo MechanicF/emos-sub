@@ -313,8 +313,8 @@ const check = (name, cond, extra) => { if (cond) { console.log('OK   ' + name); 
   check('unlock: config quotes dangerous values (no YAML injection)',
     /password: "user:pass"/.test(mcfg));
   // 7 providers registered
-  check('unlock: all 7 providers registered', unlockLib.PROVIDERS.length === 7 &&
-    ['netflix', 'disney', 'youtube_premium', 'openai', 'gemini', 'claude', 'bahamut'].every((p) => unlockLib.PROVIDERS.includes(p)));
+  check('unlock: all 7 IPQuality providers registered', unlockLib.PROVIDERS.length === 7 &&
+    ['tiktok', 'disney', 'netflix', 'youtube_premium', 'amazonpv', 'reddit', 'chatgpt'].every((p) => unlockLib.PROVIDERS.includes(p)));
   // Endpoint requires login
   const unlockAnon = await req(port, 'GET', '/api/unlock', {});
   check('unlock: /api/unlock requires login', unlockAnon.status === 401, 'got ' + unlockAnon.status);
@@ -557,8 +557,11 @@ if (process.argv.includes('-t')) { setInterval(() => {}, 1000); } else { process
   // (v1.5.21): an "异常" tag with no reason is unactionable, so the console
   // renders the stored reason next to it; available tags stay clean.
   const serverSrc = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
-  check('unlock: error/unknown tags render the stored reason',
-    serverSrc.includes("if((st==='error'||st==='unknown')&&r.reason)h+=' <small>'+esc(r.reason)+'</small>';"),
+  // Reason is surfaced inline in the status cell (small text under the
+  // status label) so it is visible on mobile, where the title tooltip
+  // cannot be hovered — and kept in the tooltip as well.
+  check('unlock: error/unknown cells render the stored reason',
+    serverSrc.includes("esc(rsn)") && serverSrc.includes("'<br><small>'+esc(rsn)+'</small>'"),
     'reason rendering missing from unlockTagsHtml');
 
   // 25. egress IP: checkNodeOnProxy records the IP the node exits from

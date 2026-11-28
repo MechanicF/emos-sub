@@ -11,7 +11,8 @@ const os = require('os');
 const path = require('path');
 const { spawn } = require('child_process');
 
-const PROVIDERS = ['netflix', 'disney', 'youtube_premium', 'openai', 'gemini', 'claude', 'bahamut'];
+// xykt/IPQuality order: TikTok, Disney+, Netflix, YouTube, AmazonPV, Reddit, ChatGPT.
+const PROVIDERS = ['tiktok', 'disney', 'netflix', 'youtube_premium', 'amazonpv', 'reddit', 'chatgpt'];
 const DEFAULT_TIMEOUT_MS = 8000;
 
 // ---------- pure helpers (exported for tests) ----------
@@ -241,9 +242,29 @@ function probeRequest(proxyPort, targetUrl, opts) {
   });
 }
 
-// ---------- 7 providers (ported from sublinkPro) ----------
+// ---------- 7 providers (ported from xykt/IPQuality ip.sh) ----------
+// Status: unlocked | blocked | failed | restricted(partial) ...
+// No DNS "native vs dns" determination: it only reflects this server's own
+// resolver (a server-level property, identical for every node), so it adds
+// no per-node information and was removed (v1.5.28).
 function res(provider, status, extra) { return Object.assign({ provider, status }, extra || {}); }
 function extract(pattern, text) { const m = pattern.exec(text || ''); return m ? m[1] : ''; }
+
+async function checkTikTok(p) {
+  const r = await probeRequest(p.port, 'https://www.tiktok.com/', { bodyLimit: 512 * 1024 });
+  if (r.error) return res('tiktok', 'failed', { reason: r.error });
+  if (/Please wait\.\.\./.test(r.body)) {
+    const r2 = await probeRequest(p.port, 'https://www.tiktok.com/explore', { bodyLimit: 512 * 1024 });
+    if (r2.error) return res('tiktok', 'failed', { reason: r2.error });
+    if (/屏蔽|not available/i.test(r2.body)) return res('tiktok', 'blocked');
+    const reg = extract(/"region":"?([A-Za-z]{2})"?/i, r2.rawBody || '').toUpperCase();
+    return res('tiktok', 'unlocked', { region: reg });
+  }
+  if (/access denied|not available|restricted|不支持|地区/i.test(r.body)) return res('tiktok', 'blocked');
+  const reg = extract(/"region":"?([A-Za-z]{2})"?/i, r.rawBody || '').toUpperCase()
+    || extract(/loc=([A-Za-z]{2})/i, r.rawBody || '').toUpperCase();
+  return res('tiktok', 'unlocked', { region: reg });
+}
 
 async function checkNetflix(p) {
   const H = { Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8' };
@@ -310,73 +331,54 @@ async function checkOpenai(p) {
   const a = await probeRequest(p.port, 'https://api.openai.com/compliance/cookie_requirements', {
     headers: { Accept: '*/*', Authorization: 'Bearer null', 'Content-Type': 'application/json', Origin: 'https://platform.openai.com', Referer: 'https://platform.openai.com/' },
   });
-  if (a.error) return res('openai', 'error', { reason: a.error });
+  if (a.error) return res('chatgpt', 'error', { reason: a.error });
   const b = await probeRequest(p.port, 'https://ios.chat.openai.com/', { headers: { Accept: '*/*;q=0.8,application/signed-exchange;v=b3;q=0.7' } });
-  if (b.error) return res('openai', 'error', { reason: b.error });
-  const aBlocked = /unsupported_country/.test(a.body), bBlocked = /vpn/.test(b.body);
-  if (!aBlocked && !bBlocked) return res('openai', 'available');
-  if (aBlocked && bBlocked) return res('openai', 'restricted', { reason: 'unsupported_country' });
-  return res('openai', 'partial', { detail: !aBlocked && bBlocked ? 'web_only' : 'mobile_app_only' });
-}
-
-async function checkGemini(p) {
-  if (p.landingCountry === 'CN') return res('gemini', 'restricted', { region: 'CN', reason: 'workspace_only_region' });
-  const r = await probeRequest(p.port, 'https://gemini.google.com/', { bodyLimit: 1024 * 1024 });
-  if (r.error) return res('gemini', 'error', { reason: r.error });
-  if (r.status >= 200 && r.status < 400) {
-    if (/\\?"45631641\\?":true/.test(r.rawBody || '')) return res('gemini', 'available');
-    const restricted = /gemini (isn't|is not) available in your (country|region)|not available in your (country|region)/i.test(r.body);
-    return res('gemini', 'restricted', { reason: restricted ? 'region_blocked' : 'gemini_marker_missing' });
+  if (b.error) return res('chatgpt', 'error', { reason: b.error });
+  let aBlocked = /unsupported_country/.test(a.body), bBlocked = /vpn/.test(b.body);
+  // IPQuality: if the API says unsupported_country, double-check by fetching
+  // chatgpt.com/favicon.ico — if it is NOT 403 the block is a false positive.
+  if (aBlocked) {
+    const fav = await probeRequest(p.port, 'https://chatgpt.com/favicon.ico', { bodyLimit: 4096 });
+    if (!fav.error && fav.status !== 403) aBlocked = false;
   }
-  if (r.status === 403) return res('gemini', 'restricted', { reason: 'status_403' });
-  return res('gemini', 'unknown', { reason: 'status_' + r.status });
+  let region = '';
+  try {
+    const t = await probeRequest(p.port, 'https://chat.openai.com/cdn-cgi/trace', { bodyLimit: 4096 });
+    if (!t.error) region = extract(/loc=([A-Za-z]{2})/i, t.rawBody || '').toUpperCase();
+  } catch (e) { /* region is optional */ }
+  if (!aBlocked && !bBlocked) return res('chatgpt', 'available', { region });
+  if (aBlocked && bBlocked) return res('chatgpt', 'restricted', { reason: 'unsupported_country' });
+  return res('chatgpt', 'partial', { region, detail: !aBlocked && bBlocked ? 'web_only' : 'mobile_app_only' });
 }
 
-async function checkClaude(p) {
-  const r = await probeRequest(p.port, 'https://claude.ai/');
-  if (r.error) return res('claude', 'error', { reason: r.error });
-  const finalUrl = String(r.url || '').trim().toLowerCase().replace(/\/+$/, '');
-  if (finalUrl === 'https://claude.ai') return res('claude', 'available');
-  if (finalUrl === 'https://www.anthropic.com/app-unavailable-in-region') return res('claude', 'restricted', { reason: 'app_unavailable_in_region' });
-  if (r.status === 403) return res('claude', 'restricted', { reason: 'status_403' });
-  return res('claude', 'unknown', { reason: r.status >= 200 && r.status < 400 ? 'unexpected_final_url' : 'status_' + r.status });
+async function checkAmazonPv(p) {
+  const r = await probeRequest(p.port, 'https://www.primevideo.com/', { bodyLimit: 512 * 1024 });
+  if (r.error) return res('amazonpv', 'failed', { reason: r.error });
+  const region = extract(/"currentTerritory"\s*:\s*"([A-Z]{2})"/i, r.rawBody || '').toUpperCase();
+  if (region) return res('amazonpv', 'unlocked', { region });
+  return res('amazonpv', 'blocked');
 }
 
-async function checkBahamut(p) {
-  const H = {
-    Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-    'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 Edg/124.0.0.0',
+async function checkReddit(p) {
+  const headers = {
+    Accept: '*/*', 'Accept-Language': 'en-US,en;q=0.9',
+    Referer: 'https://www.reddit.com/', Origin: 'https://www.reddit.com',
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36',
   };
-  let cookies = '';
-  const fetchB = async (url) => {
-    const r = await probeRequest(p.port, url, { headers: Object.assign({}, H, cookies ? { Cookie: cookies } : {}) });
-    if (r.headers && r.headers['set-cookie']) cookies = [].concat(r.headers['set-cookie']).map((c) => String(c).split(';')[0]).join('; ');
-    return r;
-  };
-  const dev = await fetchB('https://ani.gamer.com.tw/ajax/getdeviceid.php');
-  if (dev.error) return res('bahamut', 'error', { reason: dev.error });
-  let deviceId = '';
-  try { deviceId = JSON.parse(dev.rawBody || '').deviceid || ''; } catch (e) {}
-  if (/^\s*</.test(dev.rawBody || '')) return res('bahamut', 'unsupported', { reason: 'not_available' });
-  const tokenUrl = (sn) => 'https://ani.gamer.com.tw/ajax/token.php?adID=89422&sn=' + sn + '&device=' + encodeURIComponent(deviceId);
-  const lenient = await fetchB(tokenUrl('37783'));
-  if (lenient.error) return res('bahamut', 'error', { reason: lenient.error });
-  let ok = false; try { ok = !!JSON.parse(lenient.rawBody || '').animeSn; } catch (e) {}
-  if (!ok) return res('bahamut', 'unsupported', { reason: 'region_unavailable' });
-  const strict = await fetchB(tokenUrl('38832'));
-  if (strict.error) return res('bahamut', 'error', { reason: strict.error });
-  let tw = false; try { tw = !!JSON.parse(strict.rawBody || '').animeSn; } catch (e) {}
-  if (tw) return res('bahamut', 'available', { region: 'TW' });
-  const trace = await fetchB('https://ani.gamer.com.tw/cdn-cgi/trace');
-  const m = /loc=([A-Za-z]{2})/.exec(trace.rawBody || '');
-  if (m) return res('bahamut', 'available', { region: m[1].toUpperCase() });
-  return res('bahamut', 'partial', { detail: 'primary_token_only' });
+  const r = await probeRequest(p.port, 'https://www.reddit.com/svc/shreddit/reddit-chat', { headers, bodyLimit: 512 * 1024 });
+  if (r.error) return res('reddit', 'failed', { reason: r.error });
+  if (r.status === 403 || /blocked|forbidden/i.test(r.body)) return res('reddit', 'blocked');
+  if (r.status === 200) {
+    const region = extract(/country="([^"]+)"/i, r.rawBody || '').toUpperCase();
+    return res('reddit', 'unlocked', { region });
+  }
+  return res('reddit', 'failed', { reason: 'status_' + r.status });
 }
 
 const CHECKERS = {
-  netflix: checkNetflix, disney: checkDisney, youtube_premium: checkYoutube,
-  openai: checkOpenai, gemini: checkGemini, claude: checkClaude, bahamut: checkBahamut,
+  tiktok: checkTikTok, disney: checkDisney, netflix: checkNetflix,
+  youtube_premium: checkYoutube, amazonpv: checkAmazonPv, reddit: checkReddit,
+  chatgpt: checkOpenai,
 };
 
 // ---------- mihomo process manager (one process, all nodes) ----------
@@ -630,5 +632,5 @@ async function runUnlockCheck(nodes, binary, opts) {
 
 module.exports = {
   PROVIDERS, linkToProxy, yamlProxyEntry, buildMihomoConfig, probeRequest, checkNodeOnProxy, checkEgressIp, maskIp, fetchDirectIp, runUnlockCheck, MihomoProxy, stopAllMihomo,
-  checkNetflix, checkDisney, checkYoutubePremium: checkYoutube, checkOpenai, checkGemini, checkClaude, checkBahamut,
+  checkTikTok, checkNetflix, checkDisney, checkYoutubePremium: checkYoutube, checkAmazonPv, checkReddit, checkOpenai,
 };
