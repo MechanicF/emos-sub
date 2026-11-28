@@ -526,6 +526,22 @@ if (process.argv.includes('-t')) { setInterval(() => {}, 1000); } else { process
   check('unlock: egress IP is null when the probe fails', deadIp === null, 'got ' + deadIp);
   fakeIpify.close(); ipifyProxy.close();
 
+  // 26. mihomo start is patient and retries (v1.5.23): a binary that stays
+  // alive without listening no longer kills the run after 9s with a bare
+  // "no stderr" — each attempt waits 20s, it retries once on a fresh port,
+  // and the error names the ports and whether the process was alive.
+  const slowSrc = `#!/usr/bin/env node\n'use strict';\nif (process.argv.includes('-t')) process.exit(0);\nsetInterval(() => {}, 1000);\n`;
+  const slowBin = path.join(tmp, 'fake-mihomo-slow');
+  fs.writeFileSync(slowBin, slowSrc, { mode: 0o755 });
+  const slowProxy = new unlockLib.MihomoProxy(slowBin, [unlockLib.linkToProxy('hy2://u:p@example.com:443?sni=example.com', 's-node')], { startTimeoutMs: 1000, startRetries: 1 });
+  const st0 = Date.now();
+  let slowErr = '';
+  try { await slowProxy.start(); } catch (e) { slowErr = e.message; } finally { try { slowProxy.stop(); } catch (e) {} }
+  const st = Date.now() - st0;
+  check('unlock: hung start retries then fails with diagnostics',
+    /failed to start within 1s/.test(slowErr) && /mixed-port \d+/.test(slowErr) && /still running/.test(slowErr) && st >= 1900 && st < 10000,
+    'got ' + st + 'ms: ' + slowErr.slice(0, 140));
+
   lib.server.close(); mockEmos.close(); mockProbe.close();
   try { fs.rmSync(tmp, { recursive: true, force: true }); } catch (e) { /* noop */ }
   console.log('\ncheck-fixes: ' + pass + ' passed, ' + fail + ' failed');

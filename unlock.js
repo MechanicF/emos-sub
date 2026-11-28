@@ -427,27 +427,61 @@ class MihomoProxy {
       throw new Error('mihomo config invalid (exit ' + testCode + '): ' + (testErr.trim().slice(0, 600) || 'no details'));
     }
 
-    this.proc = spawn(this.binary, ['-d', this.dir, '-f', cfgPath], {
-      stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true,
-    });
-    activeProxies.add(this);
-    // Keep stderr so a startup failure reports the real reason (port clash,
-    // bad field, missing geo data) rather than just an exit code.
-    let stderr = '';
-    this.proc.stderr.on('data', (c) => { stderr += c.toString(); if (stderr.length > 4000) stderr = stderr.slice(-4000); });
-    for (let i = 0; i < 60; i++) {
-      if (this.proc.exitCode !== null) throw new Error('mihomo exited with ' + this.proc.exitCode + ': ' + (stderr.trim() || 'no stderr'));
-      const ok = await new Promise((resolve) => {
-        const s = net.connect(this.port, '127.0.0.1');
-        s.setTimeout(300);
-        s.on('connect', () => { s.destroy(); resolve(true); });
-        s.on('error', () => { s.destroy(); resolve(false); });
-        s.on('timeout', () => { s.destroy(); resolve(false); });
+    // Spawn + readiness, with a retry on a fresh port. A small or busy VPS
+    // can take >9s for a cold start (the old window), and a transient port
+    // clash fails the same way — both used to kill the whole run with a bare
+    // "no stderr". Each attempt gets its own ports; the error names the
+    // ports and whether the process was still alive, so a real failure is
+    // diagnosable instead of a guess. opts.startTimeoutMs / startRetries
+    // are only overridden in tests.
+    const startTimeoutMs = (this.opts && this.opts.startTimeoutMs) || 20000;
+    const startRetries = (this.opts && typeof this.opts.startRetries === 'number') ? this.opts.startRetries : 1;
+    const writeCfg = () => {
+      fs.writeFileSync(cfgPath, buildMihomoConfig(this.proxies, this.port, this.controller), { mode: 0o600 });
+    };
+    let lastErr = null;
+    for (let attempt = 1; attempt <= 1 + startRetries; attempt++) {
+      if (attempt > 1) {
+        this.port = 20000 + Math.floor(Math.random() * 15000);
+        this.controller = this.port + 1;
+        writeCfg();
+      }
+      this.proc = spawn(this.binary, ['-d', this.dir, '-f', cfgPath], {
+        stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true,
       });
-      if (ok) return;
-      await new Promise((r) => setTimeout(r, 150));
+      activeProxies.add(this);
+      // Keep stderr so a startup failure reports the real reason (port clash,
+      // bad field, missing geo data) rather than just an exit code.
+      let stderr = '';
+      this.proc.stderr.on('data', (c) => { stderr += c.toString(); if (stderr.length > 4000) stderr = stderr.slice(-4000); });
+      const deadline = Date.now() + startTimeoutMs;
+      let started = false;
+      while (Date.now() < deadline) {
+        if (this.proc.exitCode !== null) {
+          lastErr = new Error('mihomo exited with ' + this.proc.exitCode + ': ' + (stderr.trim() || 'no stderr'));
+          break;
+        }
+        const ok = await new Promise((resolve) => {
+          const s = net.connect(this.port, '127.0.0.1');
+          s.setTimeout(300);
+          s.on('connect', () => { s.destroy(); resolve(true); });
+          s.on('error', () => { s.destroy(); resolve(false); });
+          s.on('timeout', () => { s.destroy(); resolve(false); });
+        });
+        if (ok) { started = true; break; }
+        await new Promise((r) => setTimeout(r, 150));
+      }
+      if (started) return;
+      if (!lastErr) {
+        const alive = this.proc.exitCode === null;
+        lastErr = new Error('mihomo failed to start within ' + Math.round(startTimeoutMs / 1000) + 's (mixed-port ' + this.port + ', controller ' + this.controller + ', process ' + (alive ? 'still running' : 'exited') + '): ' + (stderr.trim() || 'no stderr'));
+      }
+      // Clean up this attempt before retrying or giving up.
+      try { if (this.proc.exitCode === null) this.proc.kill('SIGKILL'); } catch (e) {}
+      activeProxies.delete(this);
+      this.proc = null;
+      if (attempt === 1 + startRetries) throw lastErr;
     }
-    throw new Error('mihomo failed to start within 9s: ' + (stderr.trim() || 'no stderr'));
   }
   // Select which proxy the PROXY group routes through.
   async select(name) {
