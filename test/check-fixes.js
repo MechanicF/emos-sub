@@ -588,6 +588,26 @@ if (process.argv.includes('-t')) { setInterval(() => {}, 1000); } else { process
     recLines.length === 2 && recLines[0] === '"r-node-1"' && recLines[1] === '"r-node-2"',
     'got ' + JSON.stringify(recLines));
 
+  // 29. direct-IP baseline (v1.5.26): fetchDirectIp reads the server's own
+  // egress IP with no proxy, so a node whose IP equals it can be flagged as
+  // going direct. Tested against a local server (no real ipify call).
+  const directSrv = http.createServer((req, res) => { res.writeHead(200, { 'Content-Type': 'text/plain' }); res.end('203.0.113.99'); });
+  await new Promise((r) => directSrv.listen(0, '127.0.0.1', r));
+  const directIp = await unlockLib.fetchDirectIp('http://127.0.0.1:' + directSrv.address().port + '/');
+  check('unlock: fetchDirectIp returns the server direct IP', directIp === '203.0.113.99', 'got ' + directIp);
+  const garbageSrv = http.createServer((req, res) => { res.writeHead(200); res.end('not an ip'); });
+  await new Promise((r) => garbageSrv.listen(0, '127.0.0.1', r));
+  const garbageIp = await unlockLib.fetchDirectIp('http://127.0.0.1:' + garbageSrv.address().port + '/');
+  check('unlock: fetchDirectIp rejects a non-IP body', garbageIp === null, 'got ' + garbageIp);
+  const closedIp = await unlockLib.fetchDirectIp('http://127.0.0.1:1/');
+  check('unlock: fetchDirectIp returns null when the target is unreachable', closedIp === null, 'got ' + closedIp);
+  directSrv.close(); garbageSrv.close();
+  // A node whose egress IP equals the server direct IP is the direct case;
+  // the masked forms agree too, so the console can compare masked values.
+  check('unlock: direct node IP masks to the same value as the server IP',
+    unlockLib.maskIp('203.0.113.99') === unlockLib.maskIp('203.0.113.99') &&
+    unlockLib.maskIp('203.0.113.99') === '203.0.*.*');
+
   lib.server.close(); mockEmos.close(); mockProbe.close();
   try { fs.rmSync(tmp, { recursive: true, force: true }); } catch (e) { /* noop */ }
   console.log('\ncheck-fixes: ' + pass + ' passed, ' + fail + ' failed');

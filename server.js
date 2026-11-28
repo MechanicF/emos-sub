@@ -1,4 +1,4 @@
-// EMOS-gated sing-box gateway v1.5.25 — zero dependencies.
+// EMOS-gated sing-box gateway v1.5.26 — zero dependencies.
 // Node >= 18 (uses global fetch). Run: node server.js  (PORT env, default 3000)
 // Scope: EMOS login -> carrot > 500 -> console (nodes + per-user sub links)
 // + NODE TOTAL traffic only, from https://1e.lol/api/nodes. NO per-user traffic.
@@ -28,7 +28,7 @@ const net = require('net');
 const unlockLib = require('./unlock');
 
 const PORT = parseInt(process.env.PORT || '3000', 10);
-const VERSION = '1.5.25';
+const VERSION = '1.5.26';
 const CONFIG_PATH = path.join(__dirname, 'config', 'nodes.json');
 const CLASH_TEMPLATE_PATH = path.join(__dirname, 'config', 'templates', 'clash.yaml');
 const SINGBOX_TEMPLATE_PATH = path.join(__dirname, 'config', 'templates', 'singbox.json');
@@ -61,7 +61,7 @@ const UNLOCK_PATH = process.env.EMOS_UNLOCK_FILE || path.join(__dirname, 'config
 const UNLOCK_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const UNLOCK_ENABLED = process.env.UNLOCK_ENABLED === '1';
 const MIHOMO_BIN = process.env.MIHOMO_BIN || path.join(__dirname, 'mihomo');
-let unlockData = { updatedAt: null, results: {} };   // key -> {providers|error, updatedAt}
+let unlockData = { updatedAt: null, serverIp: null, results: {} };   // key -> {providers|error, updatedAt}; serverIp is the server's own direct egress IP (no proxy)
 let unlockRunning = false;
 let unlockLastError = null;
 // Live progress of the current (or most recent) scan, so the UI can show
@@ -88,18 +88,24 @@ function loadUnlock() {
   try {
     const doc = JSON.parse(fs.readFileSync(UNLOCK_PATH, 'utf8'));
     if (doc && typeof doc === 'object' && doc.results && typeof doc.results === 'object') {
-      unlockData = { updatedAt: doc.updatedAt || null, results: doc.results };
+      unlockData = { updatedAt: doc.updatedAt || null, serverIp: doc.serverIp || null, results: doc.results };
       if (typeof doc.enabled === 'boolean') unlockRuntimeEnabled = doc.enabled;
     }
   } catch (e) { /* first run or unreadable — start empty */ }
 }
-function unlockPublic() {
+function unlockPublic(isAdmin) {
   const results = {};
   for (const [key, v] of Object.entries(unlockData.results)) {
     // strip anything that could carry node credentials; expose only status
     const out = { updatedAt: v && v.updatedAt ? v.updatedAt : null };
     if (v && v.error) out.error = v.error;
-    if (v && v.ip) out.ip = unlockLib.maskIp(v.ip); // masked: full IP never leaves the server
+    if (v && v.ip) {
+      out.ip = unlockLib.maskIp(v.ip); // masked: full IP never leaves the server
+      // A node's egress IP equal to the server's own direct IP means its
+      // traffic went direct from the server instead of through the node.
+      if (unlockData.serverIp && v.ip === unlockData.serverIp) out.direct = true;
+      if (isAdmin) out.ipFull = v.ip; // admin only: full IP, to compare nodes
+    }
     if (v && v.providers) {
       out.providers = {};
       for (const [prov, r] of Object.entries(v.providers)) {
@@ -111,9 +117,12 @@ function unlockPublic() {
     }
     results[key] = out;
   }
-  return { ok: true, enabled: unlockRuntimeEnabled, available: UNLOCK_ENABLED,
+  const pub = { ok: true, enabled: unlockRuntimeEnabled, available: UNLOCK_ENABLED,
     running: unlockRunning, updatedAt: unlockData.updatedAt, lastError: unlockLastError,
-    progress: unlockProgress, providers: unlockLib.PROVIDERS, results };
+    progress: unlockProgress, providers: unlockLib.PROVIDERS, results,
+    serverIp: unlockData.serverIp ? unlockLib.maskIp(unlockData.serverIp) : null };
+  if (isAdmin && unlockData.serverIp) pub.serverIpFull = unlockData.serverIp;
+  return pub;
 }
 // Scheduled/timer entry: honours the runtime switch + concurrency guard.
 async function runUnlock() {
@@ -133,6 +142,9 @@ async function doUnlock() {
   const nodes = NODES.map((n) => ({ key: n.key, link: n.link || n.hy2_link || null, region: n.region || n.country || '' }));
   if (!nodes.length) return;
   unlockLastError = null;
+  // Baseline: the server's own egress IP with no proxy. A node whose egress
+  // IP equals this one did not go through its node — flagged in unlockPublic.
+  unlockData.serverIp = await unlockLib.fetchDirectIp();
   unlockProgress = { phase: 'starting', startedAt: Date.now(), finishedAt: null,
     currentKey: null, currentIndex: 0, total: nodes.length, done: 0, failed: 0,
     nodeStartedAt: null, lastUpdateAt: Date.now(), error: null };
@@ -2298,6 +2310,7 @@ const ADMIN_HTML = `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8
 <div class="table-scroll"><table><thead><tr><th>Key</th><th>名称</th><th>到期</th><th>协议</th><th>服务器</th><th>探针</th><th>操作</th></tr></thead><tbody id="nodeRows"></tbody></table></div>
 <h2 style="margin-top:20px">解锁检测</h2>
 <p class="muted" id="unlockAdminNote"></p>
+<p class="muted" id="unlockAdminIps"></p>
 <div class="bar" id="unlockProgressBar" style="display:none"><i style="width:0%"></i></div>
 <div class="actions unlock-controls"><button type="button" class="ghost" id="btnUnlockToggle">解锁检测：开启</button> <button type="button" class="ghost" id="btnUnlockRun">立即检测</button></div>
 <p id="unlockAdminMsg" class="msg"></p>
@@ -2458,6 +2471,17 @@ async function loadUnlockAdmin(){
       var pt=unlockProgressText(j);
       n.textContent=(pt&&j.progress&&(j.progress.phase==='finished'||j.progress.phase==='failed'))?base+'；'+pt:base;
     }
+  }
+  var ips=document.getElementById('unlockAdminIps');
+  if(ips){
+    var lines=[];
+    if(j.serverIpFull)lines.push('服务器直连出口 IP：'+j.serverIpFull);
+    Object.keys(j.results||{}).forEach(function(k){
+      var r=j.results[k];
+      if(r&&r.ipFull)lines.push(k+'：'+r.ipFull+(r.direct?'（与服务器直连 IP 相同）':''));
+      else if(r&&r.ip)lines.push(k+'：'+r.ip);
+    });
+    ips.textContent=lines.length?lines.join('；'):'';
   }
   var bar=document.getElementById('unlockProgressBar');
   if(bar){
@@ -2639,7 +2663,7 @@ function unlockTagsHtml(key){
   if(d.error)return '<span class=\\"utag error\\">检测失败：'+esc(d.error)+'</span>';
   if(!d.providers)return '<span class=\\"unlock-empty\\">暂无解锁数据</span>';
   var h='';
-  if(d.ip)h+='<div class=\\"muted\\" style=\\"margin-bottom:6px\\">出口 IP：'+esc(d.ip)+'</div>';
+  if(d.ip)h+='<div class=\\"muted\\" style=\\"margin-bottom:6px\\">出口 IP：'+esc(d.ip)+(d.direct?'（与服务器直连 IP 相同，可能未走节点）':'')+'</div>';
   h+='<div class=\\"unlock-tags\\">';
   unlockState.providers.forEach(function(prov){
     var r=d.providers[prov]||{status:"untested"};
@@ -2799,7 +2823,7 @@ const server = http.createServer(async (req, res) => {
       // Read-only state: both the console (shows the unlock column) and the
       // admin panel (owns the controls) need it.
       if (!getSession(req) && !getAdminSession(req)) return sendJson(res, 401, { ok: false, error: 'login required' });
-      return sendJson(res, 200, unlockPublic());
+      return sendJson(res, 200, unlockPublic(!!getAdminSession(req)));
     }
     // Admin controls: toggle detection and trigger an immediate scan. These
     // are operator actions, so they require admin auth — a console session

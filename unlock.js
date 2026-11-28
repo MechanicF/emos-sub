@@ -528,6 +528,32 @@ function maskIp(ip) {
   return ip;
 }
 
+// The server's own egress IP, fetched directly with no proxy at all.
+// Each node's egress IP is compared against this baseline: if a node's IP
+// equals it, that node's traffic went direct from the server instead of
+// through the node. Returns null on any failure (the diagnostic then just
+// stays silent — no false flags).
+async function fetchDirectIp(url) {
+  const target = new URL(url || 'https://api.ipify.org/');
+  const mod = target.protocol === 'https:' ? https : http;
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (v) => { if (!done) { done = true; resolve(v); } };
+    const req = mod.get(target, { timeout: 5000 }, (res) => {
+      let body = '';
+      res.on('data', (c) => { body += c; if (body.length > 64) { try { req.destroy(); } catch (e) {} finish(null); } });
+      res.on('end', () => {
+        const ip = String(body || '').trim();
+        if (/^(\d{1,3}\.){3}\d{1,3}$/.test(ip) || /^[0-9a-fA-F:]{3,45}$/.test(ip)) finish(ip);
+        else finish(null);
+      });
+      res.on('error', () => finish(null));
+    });
+    req.on('timeout', () => { try { req.destroy(); } catch (e) {} finish(null); });
+    req.on('error', () => finish(null));
+  });
+}
+
 // Probe every provider for a single node through its own mihomo instance
 // (see runUnlockCheck). The egress IP is fetched first, alone, before the
 // 7 provider probes; the providers still run in parallel.
@@ -580,6 +606,6 @@ async function runUnlockCheck(nodes, binary, opts) {
 }
 
 module.exports = {
-  PROVIDERS, linkToProxy, yamlProxyEntry, buildMihomoConfig, probeRequest, checkNodeOnProxy, checkEgressIp, maskIp, runUnlockCheck, MihomoProxy, stopAllMihomo,
+  PROVIDERS, linkToProxy, yamlProxyEntry, buildMihomoConfig, probeRequest, checkNodeOnProxy, checkEgressIp, maskIp, fetchDirectIp, runUnlockCheck, MihomoProxy, stopAllMihomo,
   checkNetflix, checkDisney, checkYoutubePremium: checkYoutube, checkOpenai, checkGemini, checkClaude, checkBahamut,
 };
