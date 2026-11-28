@@ -227,6 +227,76 @@ const check = (name, cond, extra) => { if (cond) { console.log('OK   ' + name); 
   check('fresh link after user disable serves',
     (await sub(ii2.sub_token)).status === 200);
 
+  // 16. v1.5.14 (H1): an expired console session must not delete the share.
+  // Regression: getSession() used to call shares.delete(s.shareToken) on
+  // session expiry, silently revoking every client of that user as soon as
+  // they opened the console again — the exact opposite of v1.5.13's promise.
+  // SESSION_TTL_MS is env-driven; to exercise expiry in the same process we
+  // start a second server on another port with a 1.2 s session TTL.
+  const SESSION_PORT = 3199;
+  const sessState = path.join(tmp, 'session-expiry-state.json');
+  // CARROT_GRACE_MS must be reset to the production default: this suite sets
+  // it to 1500 ms for its own short timeout tests, and inheriting that here
+  // would expire the demo share during the 1.6 s wait (a false H1 failure).
+  const sessEnv = { ...process.env, PORT: String(SESSION_PORT), SESSION_TTL_MS: '1200',
+    SHARE_TTL_HOURS: '0', CARROT_GRACE_MS: '86400000',
+    EMOS_STATE_FILE: sessState, DEMO_ENABLED: '1' };
+  const { spawn } = require('child_process');
+  const sessSrv = spawn(process.execPath, [path.join(__dirname, '..', 'server.js')],
+    { cwd: path.join(__dirname, '..'), env: sessEnv, stdio: ['ignore', 'pipe', 'pipe'] });
+  sessSrv.stderr.on('data', () => {});
+  for (let i = 0; i < 60; i++) {
+    const h = await req(SESSION_PORT, 'GET', '/health', {});
+    if (h.status === 200) break;
+    await sleep(100);
+  }
+  const sj = json(await req(SESSION_PORT, 'POST', '/api/auth', {}, { carrot: 600 }));
+  check('H1 setup: demo login succeeds', sj.ok === true && !!sj.sub_token,
+    JSON.stringify(sj).slice(0, 120));
+  check('H1 setup: link works before session expiry',
+    (await req(SESSION_PORT, 'GET', '/c/?token=' + encodeURIComponent(sj.sub_token), { 'User-Agent': 'sing-box/1.12.0' })).status === 200);
+  await sleep(1600); // past SESSION_TTL_MS (1200)
+  // Touch a getSession() endpoint with the now-expired session — this is the
+  // exact path that used to delete the share.
+  const expiredNodes = await req(SESSION_PORT, 'GET', '/api/nodes', { 'X-Session': sj.session });
+  check('H1: expired session is rejected', expiredNodes.status === 401, 'got ' + expiredNodes.status);
+  const afterExpiry = await req(SESSION_PORT, 'GET', '/c/?token=' + encodeURIComponent(sj.sub_token), { 'User-Agent': 'sing-box/1.12.0' });
+  check('H1: subscription survives session expiry + console touch', afterExpiry.status === 200,
+    'got ' + afterExpiry.status + ' ' + afterExpiry.body.slice(0, 100));
+  sessSrv.kill('SIGTERM');
+
+  // 17. v1.5.14 (H2): when SHARE_TTL_HOURS > 0, re-login after the share
+  // expires must issue a *usable* link. Regression: issueUserSession()
+  // reused the expired share but never refreshed expires_at → permanent 403.
+  const TTL_PORT = 3201;
+  const ttlState = path.join(tmp, 'share-ttl-state.json');
+  const ttlEnv = { ...process.env, PORT: String(TTL_PORT), SESSION_TTL_MS: '600000',
+    SHARE_TTL_HOURS: '0.001', EMOS_STATE_FILE: ttlState, DEMO_ENABLED: '1' };
+  const ttlSrv = spawn(process.execPath, [path.join(__dirname, '..', 'server.js')],
+    { cwd: path.join(__dirname, '..'), env: ttlEnv, stdio: ['ignore', 'pipe', 'pipe'] });
+  ttlSrv.stderr.on('data', () => {});
+  for (let i = 0; i < 60; i++) {
+    const h = await req(TTL_PORT, 'GET', '/health', {});
+    if (h.status === 200) break;
+    await sleep(100);
+  }
+  const tj = json(await req(TTL_PORT, 'POST', '/api/auth', {}, { carrot: 600 }));
+  check('H2 setup: short-TTL login succeeds', tj.ok === true && !!tj.sub_token,
+    JSON.stringify(tj).slice(0, 120));
+  check('H2 setup: link works before TTL',
+    (await req(TTL_PORT, 'GET', '/c/?token=' + encodeURIComponent(tj.sub_token), { 'User-Agent': 'sing-box/1.12.0' })).status === 200);
+  await sleep(4200); // past 0.001 h = 3.6 s share TTL
+  check('H2 setup: link expires after TTL',
+    (await req(TTL_PORT, 'GET', '/c/?token=' + encodeURIComponent(tj.sub_token), { 'User-Agent': 'sing-box/1.12.0' })).status === 403);
+  const tj2 = json(await req(TTL_PORT, 'POST', '/api/auth', {}, { carrot: 600 }));
+  check('H2: re-login after TTL succeeds', tj2.ok === true, JSON.stringify(tj2).slice(0, 120));
+  check('H2: re-login refreshes expires_at (same token, new expiry)',
+    tj2.sub_token === tj.sub_token && tj2.share && tj2.share.expires_at > Date.now(),
+    'old=' + (tj.share || {}).expires_at + ' new=' + (tj2.share || {}).expires_at);
+  check('H2: re-issued link is usable',
+    (await req(TTL_PORT, 'GET', '/c/?token=' + encodeURIComponent(tj2.sub_token), { 'User-Agent': 'sing-box/1.12.0' })).status === 200);
+  ttlSrv.kill('SIGTERM');
+
   lib.server.close(); mockEmos.close(); mockProbe.close();
   try { fs.rmSync(tmp, { recursive: true, force: true }); } catch (e) { /* noop */ }
   console.log('\ncheck-fixes: ' + pass + ' passed, ' + fail + ' failed');

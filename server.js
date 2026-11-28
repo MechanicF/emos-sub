@@ -1,4 +1,4 @@
-// EMOS-gated sing-box gateway v1.5.12 — zero dependencies.
+// EMOS-gated sing-box gateway v1.5.14 — zero dependencies.
 // Node >= 18 (uses global fetch). Run: node server.js  (PORT env, default 3000)
 // Scope: EMOS login -> carrot > 500 -> console (nodes + per-user sub links)
 // + NODE TOTAL traffic only, from https://1e.lol/api/nodes. NO per-user traffic.
@@ -26,7 +26,7 @@ const crypto = require('crypto');
 const net = require('net');
 
 const PORT = parseInt(process.env.PORT || '3000', 10);
-const VERSION = '1.5.13';
+const VERSION = '1.5.14';
 const CONFIG_PATH = path.join(__dirname, 'config', 'nodes.json');
 const CLASH_TEMPLATE_PATH = path.join(__dirname, 'config', 'templates', 'clash.yaml');
 const SINGBOX_TEMPLATE_PATH = path.join(__dirname, 'config', 'templates', 'singbox.json');
@@ -377,7 +377,12 @@ function getSession(req) {
   if (!sid || typeof sid !== 'string') return null;
   const s = sessions.get(sid);
   if (!s) return null;
-  if (Date.now() > s.expiresAt) { sessions.delete(sid); if (s.shareToken) shares.delete(s.shareToken); return null; }
+  // v1.5.14 (H1): an expired console session must NOT delete the share.
+  // The subscription link outlives the login session by design; only the
+  // share's own expires_at / an explicit revoke may kill it. The hourly
+  // sweeper and loadState() already follow this rule — keep this path in
+  // sync, otherwise one console poll after 24 h revokes every client.
+  if (Date.now() > s.expiresAt) { sessions.delete(sid); return null; }
   return { sid, ...s };
 }
 
@@ -1304,6 +1309,15 @@ async function emosCarrotOnly(token) {
 // cannot see a URL #hash, so if EMOS ever puts the token in the hash the
 // callback would see no_token; document that if it happens.
 const EMOS_APP_NAME = process.env.EMOS_APP_NAME || 'emos-sub';
+// v1.5.14 (M2): DEMO_ENABLED bypasses the carrot gate entirely and gives
+// every caller the same demo-user. Refuse it in production and warn loudly
+// so a leaked env var cannot silently open a free subscription endpoint.
+const DEMO_ENABLED = process.env.DEMO_ENABLED === '1' && process.env.NODE_ENV !== 'production';
+if (process.env.DEMO_ENABLED === '1' && !DEMO_ENABLED) {
+  console.error('WARNING: DEMO_ENABLED=1 ignored because NODE_ENV=production (demo login bypasses the carrot gate)');
+} else if (DEMO_ENABLED) {
+  console.warn('WARNING: DEMO_ENABLED=1 — anyone can log in with an arbitrary carrot; never use this in production');
+}
 // PUBLIC_URL: the public base users reach this gateway at, e.g.
 // https://sub.example.com. Normalised: a bare domain without a scheme gets
 // https:// prepended (a scheme-less PUBLIC_URL would otherwise build a
@@ -1408,6 +1422,14 @@ function issueUserSession(req, result, token, demo) {
     share = null;
   }
   if (share && !share.enabled) { share.enabled = true; share.disabledBy = null; }
+  // v1.5.14 (H2): a fresh login is a fresh proof of carrot, so it must
+  // refresh a share that reached its own TTL. Otherwise the reused token
+  // carries the old expires_at and every re-login deadlocks into 403 until
+  // the hourly sweeper happens to prune it.
+  if (share && share.expires_at && share.expires_at <= now) {
+    const ttl = shareTtlMs();
+    share.expires_at = ttl ? now + ttl : null;
+  }
   if (!share) share = createShare(sessionId, result.user_id);
   share.sessionId = sessionId;
   share.emosToken = token || null;
@@ -1436,7 +1458,7 @@ async function handleAuth(req, res) {
   if (token) {
     try { result = await emosCheck(token); }
     catch (e) { return sendJson(res, 502, { ok: false, error: 'EMOS check failed: ' + e.message }); }
-  } else if (Number.isFinite(demoCarrot) && process.env.DEMO_ENABLED === '1') {
+  } else if (Number.isFinite(demoCarrot) && DEMO_ENABLED) {
     // Demo login is off by default; enable only for local testing with DEMO_ENABLED=1.
     demo = true;
     result = { carrot: demoCarrot, user_id: 'demo-user', username: 'demo-user' };
@@ -1480,6 +1502,9 @@ function handleEmosLoginUrl(req, res) {
 // Location, never rendered in a page, and never logged — it lives only in
 // the in-memory session, same as the manual-token flow.
 async function handleEmosCallback(req, res) {
+  // v1.5.14 (M1): this endpoint mints sessions and makes 2 EMOS calls per
+  // hit — it must be rate-limited like /auth/emos and /api/auth.
+  if (!rateLimitCheck(req, res, 'emos-callback:' + clientIp(req), 30, 10 * 60 * 1000)) return;
   const u = new URL(req.url, 'http://localhost');
   const token = (u.searchParams.get('token') || u.searchParams.get('access_token') || '').trim();
   const uuid = u.searchParams.get('uuid') || '';
