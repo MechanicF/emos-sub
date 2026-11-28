@@ -1,4 +1,4 @@
-// EMOS-gated sing-box gateway v1.5.14 — zero dependencies.
+// EMOS-gated sing-box gateway v1.5.15 — zero dependencies.
 // Node >= 18 (uses global fetch). Run: node server.js  (PORT env, default 3000)
 // Scope: EMOS login -> carrot > 500 -> console (nodes + per-user sub links)
 // + NODE TOTAL traffic only, from https://1e.lol/api/nodes. NO per-user traffic.
@@ -24,9 +24,11 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const net = require('net');
+// v1.5.15: mihomo-backed unlock probes (zero-dependency Node side).
+const unlockLib = require('./unlock');
 
 const PORT = parseInt(process.env.PORT || '3000', 10);
-const VERSION = '1.5.14';
+const VERSION = '1.5.15';
 const CONFIG_PATH = path.join(__dirname, 'config', 'nodes.json');
 const CLASH_TEMPLATE_PATH = path.join(__dirname, 'config', 'templates', 'clash.yaml');
 const SINGBOX_TEMPLATE_PATH = path.join(__dirname, 'config', 'templates', 'singbox.json');
@@ -50,6 +52,81 @@ function shareTtlMs() {
 }
 const SETTINGS_PATH = path.join(__dirname, 'config', 'settings.json');
 const SETTINGS_SOURCES = { carrot_threshold: 'default', share_ttl_hours: 'default', name_rule: 'default', probe_cache_seconds: 'default' };
+
+// --- unlock checks (mihomo-backed) ---------------------------------------
+// Results are keyed by node.key and persisted to config/unlock.json (0600).
+// A full check runs on boot (deferred) and every 24 h; clients read the
+// cached result via GET /api/unlock. No per-user data is stored here.
+const UNLOCK_PATH = process.env.EMOS_UNLOCK_FILE || path.join(__dirname, 'config', 'unlock.json');
+const UNLOCK_INTERVAL_MS = 24 * 60 * 60 * 1000;
+const UNLOCK_ENABLED = process.env.UNLOCK_ENABLED === '1';
+const MIHOMO_BIN = process.env.MIHOMO_BIN || path.join(__dirname, 'mihomo');
+let unlockData = { updatedAt: null, results: {} };   // key -> {providers|error, updatedAt}
+let unlockRunning = false;
+let unlockLastError = null;
+
+function atomicWriteUnlock() {
+  try {
+    fs.mkdirSync(path.dirname(UNLOCK_PATH), { recursive: true });
+    const tmp = UNLOCK_PATH + '.tmp-' + process.pid;
+    fs.writeFileSync(tmp, JSON.stringify(unlockData, null, 2), { mode: 0o600 });
+    fs.renameSync(tmp, UNLOCK_PATH);
+    try { fs.chmodSync(UNLOCK_PATH, 0o600); } catch (e) { /* Windows */ }
+  } catch (e) { console.error('Failed to save unlock data:', e.message); }
+}
+function loadUnlock() {
+  try {
+    const doc = JSON.parse(fs.readFileSync(UNLOCK_PATH, 'utf8'));
+    if (doc && typeof doc === 'object' && doc.results && typeof doc.results === 'object') {
+      unlockData = { updatedAt: doc.updatedAt || null, results: doc.results };
+    }
+  } catch (e) { /* first run or unreadable — start empty */ }
+}
+function unlockPublic() {
+  const results = {};
+  for (const [key, v] of Object.entries(unlockData.results)) {
+    // strip anything that could carry node credentials; expose only status
+    const out = { updatedAt: v && v.updatedAt ? v.updatedAt : null };
+    if (v && v.error) out.error = v.error;
+    if (v && v.providers) {
+      out.providers = {};
+      for (const [prov, r] of Object.entries(v.providers)) {
+        out.providers[prov] = { status: r && r.status ? r.status : 'unknown' };
+        if (r && r.region) out.providers[prov].region = r.region;
+        if (r && r.reason) out.providers[prov].reason = r.reason;
+        if (r && r.detail) out.providers[prov].detail = r.detail;
+      }
+    }
+    results[key] = out;
+  }
+  return { ok: true, enabled: UNLOCK_ENABLED, running: unlockRunning,
+    updatedAt: unlockData.updatedAt, lastError: unlockLastError,
+    providers: unlockLib.PROVIDERS, results };
+}
+async function runUnlock() {
+  if (!UNLOCK_ENABLED || unlockRunning) return;
+  if (!fs.existsSync(MIHOMO_BIN)) {
+    unlockLastError = 'mihomo binary not found at ' + MIHOMO_BIN + ' — run ./manage.sh install-mihomo';
+    console.error('Unlock check skipped:', unlockLastError);
+    return;
+  }
+  const nodes = NODES.map((n) => ({ key: n.key, link: n.link || n.hy2_link || null, region: n.region || n.country || '' }));
+  if (!nodes.length) return;
+  unlockRunning = true;
+  unlockLastError = null;
+  try {
+    const results = await unlockLib.runUnlockCheck(nodes, MIHOMO_BIN, { timeout: 8000 });
+    unlockData.results = results;
+    unlockData.updatedAt = new Date().toISOString();
+    atomicWriteUnlock();
+    console.log('Unlock check complete for ' + Object.keys(results).length + ' nodes');
+  } catch (e) {
+    unlockLastError = e.message;
+    console.error('Unlock check failed:', e.message);
+  } finally {
+    unlockRunning = false;
+  }
+}
 
 let NODES = [];
 let NAME_RULE = '[$Flag] $LinkCountryName - $Name';
@@ -2026,6 +2103,18 @@ h1,h2,h3{font-weight:500}
 .card h2 .count{color:var(--muted);font-family:var(--mono);font-size:12px}
 .muted{color:var(--muted);font-size:13px}
 .bad{color:var(--negative)}.ok{color:var(--positive)}.warn{color:var(--warning)}
+.unlock-tags{display:flex;flex-wrap:wrap;gap:6px}
+.utag{display:inline-flex;align-items:center;gap:5px;font-size:11px;font-family:var(--mono);padding:3px 8px;border-radius:999px;border:1px solid var(--line);background:var(--raised);color:var(--text-2);white-space:nowrap}
+.utag.available{color:var(--positive);border-color:var(--positive)}
+.utag.partial{color:var(--warning);border-color:var(--warning)}
+.utag.restricted,.utag.error{color:var(--negative);border-color:var(--negative)}
+.utag.unsupported,.utag.unknown,.utag.untested{opacity:.6}
+.utag b{font-weight:500}
+.utag small{font-size:10px;opacity:.8}
+.unlock-row td{background:var(--raised);padding:12px 16px}
+.unlock-empty{font-size:12px;color:var(--muted)}
+.expand-btn{background:none;border:0;color:var(--accent);cursor:pointer;font-size:12px;padding:2px 6px;font-family:var(--mono)}
+.expand-btn:hover{background:none;color:var(--accent);text-decoration:underline}
 a{color:var(--accent);text-decoration:none}
 a:hover{text-decoration:underline}
 .hidden{display:none!important}
@@ -2391,7 +2480,7 @@ const HTML = `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><met
 <div class="stat"><div class="k">节点</div><div class="v" id="statNodes">—</div><div class="s">订阅内容</div></div>
 <div class="stat"><div class="k">订阅访问</div><div class="v" id="statAccess">—</div><div class="s">本条链接</div></div>
 </div>
-<div class="card"><h2>节点 · 总流量</h2><div class="table-scroll node-table"><table><thead><tr><th>节点</th><th>到期</th><th>状态</th><th>今日</th><th>本月已用 / 限额</th></tr></thead><tbody id="nodeRows"><tr><td colspan="5" class="muted">正在载入节点…</td></tr></tbody></table></div></div>
+<div class="card"><h2>节点 · 总流量</h2><div class="table-scroll node-table"><table><thead><tr><th>节点</th><th>到期</th><th>状态</th><th>今日</th><th>本月已用 / 限额</th><th>解锁</th></tr></thead><tbody id="nodeRows"><tr><td colspan="6" class="muted">正在载入节点…</td></tr></tbody></table></div><p class="muted" id="unlockNote" style="margin-top:12px"></p></div>
 <div class="card"><h2>订阅链接</h2><p>用户：<code id="who"></code> · 萝卜：<b id="carrotOut"></b>（门槛 &gt; <span class="th">500</span>）</p>
 <p class="muted">订阅链接（每人专属，粘贴到客户端即可）：</p>
 <div class="sub-row"><span class="lbl">订阅地址</span><code id="subAuto"></code><button type="button" id="btnCopyAuto">复制</button></div>
@@ -2425,6 +2514,45 @@ function renderGate(j){
   document.getElementById("dash").classList.add("hidden");
   document.getElementById("gatedMsg").innerHTML="萝卜：<b>"+esc(j.carrot)+"</b><div class=\\"big-num bad\\">还差 "+esc(j.shortfall)+"</div>才到 "+esc(j.threshold+1)+"（&gt; "+esc(j.threshold)+"）。";
 }
+var unlockState={results:{},providers:[],enabled:false,updatedAt:null,lastError:null};
+var expanded={}; // node key -> bool
+var STATUS_LABEL={available:"解锁",partial:"部分",restricted:"受限",unsupported:"不支持",unknown:"未知",error:"异常",untested:"未测"};
+function unlockTagsHtml(key){
+  var d=unlockState.results[key];
+  if(!d)return '<span class=\\"unlock-empty\\">暂无解锁数据</span>';
+  if(d.error)return '<span class=\\"utag error\\">检测失败：'+esc(d.error)+'</span>';
+  if(!d.providers)return '<span class=\\"unlock-empty\\">暂无解锁数据</span>';
+  var h='<div class=\\"unlock-tags\\">';
+  unlockState.providers.forEach(function(prov){
+    var r=d.providers[prov]||{status:"untested"};
+    var st=r.status||"untested";
+    h+='<span class=\\"utag '+esc(st)+'\\" title=\\"'+esc(prov)+'\\"><b>'+esc(prov)+'</b> '+esc(STATUS_LABEL[st]||st);
+    if(r.region)h+=' <small>'+esc(r.region)+'</small>';
+    h+='</span>';
+  });
+  return h+'</div>';
+}
+function toggleUnlock(key){
+  expanded[key]=!expanded[key];
+  var btn=document.querySelector('[data-unlock-key=\\"'+CSS.escape(key)+'\\"]');
+  if(btn)btn.textContent=expanded[key]?"收起":"解锁";
+  var row=document.getElementById("unlock-"+CSS.escape(key));
+  if(row)row.classList.toggle("hidden",!expanded[key]);
+}
+document.getElementById("nodeRows").addEventListener("click",function(e){
+  var b=e.target.closest("button[data-act=\\"unlock\\"]");
+  if(b)toggleUnlock(b.getAttribute("data-unlock-key"));
+});
+async function loadUnlock(){
+  try{
+    var r=await fetch("/api/unlock",{credentials:"include",headers:session?{"X-Session":session}:{}});
+    if(!r.ok)return;
+    var j=await r.json();
+    if(j.ok){unlockState=j;var n=document.getElementById("unlockNote");if(n){
+      n.textContent=j.enabled?("解锁检测：每 24 小时后台更新，上次 "+(j.updatedAt?new Date(j.updatedAt).toLocaleString():"尚未完成")+(j.lastError?"（"+j.lastError+"）":"")):"解锁检测未启用（设 UNLOCK_ENABLED=1 并安装 mihomo 后可用）";
+    }}
+  }catch(e){}
+}
 async function loadNodes(){
   var r;
   try{r=await fetch("/api/nodes",{credentials:"include",headers:session?{"X-Session":session}:{}});}
@@ -2437,9 +2565,12 @@ async function loadNodes(){
     var pct=n.pct_used==null?"—":n.pct_used+"%";
     var bar=n.pct_used==null?"":"<div class=\\"bar\\"><i style=\\"width:"+Math.min(100,n.pct_used)+"%\\"></i></div>";
     var pill=n.online===true?'<span class="pill ok">在线</span>':n.online===false?'<span class="pill bad">离线</span>':'<span class="pill">未知 · 不在探针里</span>';
-    html+="<tr><td data-label=\\"\\"><b>"+esc(n.name)+"</b></td><td data-label=\\"到期\\">"+fmtExpiry(n.expires_at)+"</td><td data-label=\\"状态\\">"+pill+"</td><td data-label=\\"今日\\">"+fmt(n.day_used)+"</td><td data-label=\\"本月已用 / 限额\\">"+fmt(n.month_used)+" / "+(n.traffic_limit?fmt(n.traffic_limit):"不限")+"<br><span class=\\"muted\\">已用 "+pct+" · 剩余 "+(n.remaining==null?"—":fmt(n.remaining))+"</span>"+bar+"</td></tr>";
+    var key=String(n.key);
+    var isOpen=!!expanded[key];
+    html+="<tr><td data-label=\\"\\"><b>"+esc(n.name)+"</b></td><td data-label=\\"到期\\">"+fmtExpiry(n.expires_at)+"</td><td data-label=\\"状态\\">"+pill+"</td><td data-label=\\"今日\\">"+fmt(n.day_used)+"</td><td data-label=\\"本月已用 / 限额\\">"+fmt(n.month_used)+" / "+(n.traffic_limit?fmt(n.traffic_limit):"不限")+"<br><span class=\\"muted\\">已用 "+pct+" · 剩余 "+(n.remaining==null?"—":fmt(n.remaining))+"</span>"+bar+"</td><td><button type=\\"button\\" class=\\"expand-btn\\" data-act=\\"unlock\\" data-unlock-key=\\""+esc(key)+"\\">"+(isOpen?"收起":"解锁")+"</button></td></tr>";
+    html+="<tr class=\\"unlock-row "+(isOpen?"":"hidden")+"\\" id=\\"unlock-"+esc(key)+"\\"><td colspan=\\"6\\">"+unlockTagsHtml(key)+"</td></tr>";
   });
-  document.getElementById("nodeRows").innerHTML=html||"<tr><td colspan=\\"5\\">暂无节点</td></tr>";
+  document.getElementById("nodeRows").innerHTML=html||"<tr><td colspan=\\"6\\">暂无节点</td></tr>";
 }
 document.getElementById("btnCopyAuto").onclick=function(){var url=subUrls&&(subUrls.c_url||subUrls.url);if(!url){showMsg("订阅链接还没准备好，请重新登录或稍后再试。");return}copyText(url,"已复制订阅链接，粘贴到客户端即可。");};
 document.getElementById("btnRotate").onclick=async function(){var r=await fetch("/api/sub/refresh",{method:"POST",credentials:"include",headers:session?{"X-Session":session}:{}});var j=await r.json();if(!j.ok){showMsg("刷新失败：" + (j.error||""));return}subUrls=j.sub_urls;document.getElementById("subAuto").textContent=subUrls.c_url||subUrls.url;setShareInfo(j.share);document.getElementById("copyMsg").textContent="已生成新订阅链接，旧链接立即失效，请重新导入。"};
@@ -2475,7 +2606,8 @@ async function tryResume(){
   }catch(e){/* transient network error: keep the server-rendered dashboard */}
 }
 tryResume();
-setInterval(function(){if(!document.getElementById("dash").classList.contains("hidden"))loadNodes()},30000);
+loadUnlock();
+setInterval(function(){if(!document.getElementById("dash").classList.contains("hidden")){loadNodes();loadUnlock();}},30000);
 </script></body></html>`;
 // The session cookie is HttpOnly, so JS cannot decide the first paint.
 // Render the authenticated dashboard server-side to avoid a login-card flash.
@@ -2520,6 +2652,10 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && u.pathname === '/auth/emos/callback') return await handleEmosCallback(req, res);
     if (req.method === 'GET' && u.pathname === '/api/auth/emos/login-url') return handleEmosLoginUrl(req, res);
     if (req.method === 'GET' && u.pathname === '/api/nodes') return await handleNodes(req, res);
+    if (req.method === 'GET' && u.pathname === '/api/unlock') {
+      if (!getSession(req)) return sendJson(res, 401, { ok: false, error: 'login required' });
+      return sendJson(res, 200, unlockPublic());
+    }
     if (req.method === 'GET' && u.pathname === '/api/sub-link') return await handleSubLink(req, res);
     if (req.method === 'POST' && u.pathname === '/api/sub/refresh') return await handleSubRefresh(req, res);
     if (req.method === 'POST' && u.pathname === '/api/sub/disable') return await handleSubDisable(req, res);
@@ -2545,7 +2681,13 @@ const server = http.createServer(async (req, res) => {
 
 if (require.main === module) {
   loadState();
-  const flushAndExit = () => { if (stateDirty) saveStateNow(); process.exit(0); };
+  loadUnlock();
+  if (UNLOCK_ENABLED) {
+    // Defer the first run so boot stays fast; then every 24 h.
+    setTimeout(() => { runUnlock(); }, 5000).unref();
+    setInterval(() => { runUnlock(); }, UNLOCK_INTERVAL_MS).unref();
+  }
+  const flushAndExit = () => { if (stateDirty) saveStateNow(); try { unlockLib.stopAllMihomo(); } catch (e) {} process.exit(0); };
   process.on('SIGTERM', flushAndExit);
   process.on('SIGINT', flushAndExit);
   server.listen(PORT, () => {
@@ -2558,5 +2700,5 @@ const HTML_RENDERED = HTML.split('{{VERSION}}').join(VERSION);
 const ADMIN_HTML_RENDERED = ADMIN_HTML.split('{{VERSION}}').join(VERSION);
 
 // Pure helpers exported for test/check-pages.js unit tests (no server started).
-module.exports = { server, monthEndExpireMs, normalizeExpiry, validateProbeId, parseHy2, parseVless, resolveClientIp, pickClientIp, normalizeIp, ipDiagnostics, safeDecode, VERSION };
+module.exports = { server, monthEndExpireMs, normalizeExpiry, validateProbeId, parseHy2, parseVless, resolveClientIp, pickClientIp, normalizeIp, ipDiagnostics, safeDecode, unlockPublic, runUnlock, VERSION };
 

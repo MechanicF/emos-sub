@@ -2,6 +2,7 @@
 // services, so every fix below is verified end-to-end, not just by reading code.
 // Run: node test/check-fixes.js   (no network access required)
 const http = require('http');
+const net = require('net');
 const path = require('path');
 const os = require('os');
 const fs = require('fs');
@@ -296,6 +297,50 @@ const check = (name, cond, extra) => { if (cond) { console.log('OK   ' + name); 
   check('H2: re-issued link is usable',
     (await req(TTL_PORT, 'GET', '/c/?token=' + encodeURIComponent(tj2.sub_token), { 'User-Agent': 'sing-box/1.12.0' })).status === 200);
   ttlSrv.kill('SIGTERM');
+
+  // 18. v1.5.15: unlock subsystem — pure helpers + endpoint auth.
+  const unlockLib = require(path.join(__dirname, '..', 'unlock.js'));
+  const hy2Link = 'hy2://user%3Apass@example.com:443?sni=example.com&obfs=salamander&obfs-password=secret#n';
+  const vlessLink = 'vless://11111111-2222-3333-4444-555555555555@example.com:443?security=reality&pbk=abc&sni=example.com&fp=chrome#v';
+  const hy2Proxy = unlockLib.linkToProxy(hy2Link, 'k1');
+  check('unlock: hy2 link -> mihomo proxy', !!hy2Proxy && hy2Proxy.type === 'hysteria2' && hy2Proxy.password === 'user:pass');
+  const vlessProxy = unlockLib.linkToProxy(vlessLink, 'k2');
+  check('unlock: vless reality -> mihomo proxy', !!vlessProxy && vlessProxy.type === 'vless' && !!vlessProxy['reality-opts']);
+  check('unlock: unsupported link rejected', unlockLib.linkToProxy('ss://xxx', 'k3') === null);
+  const mcfg = unlockLib.buildMihomoConfig([hy2Proxy], 7890, 9090);
+  check('unlock: mihomo config has mixed-port + proxy group + rule',
+    /mixed-port: 7890/.test(mcfg) && /name: PROXY/.test(mcfg) && /MATCH,PROXY/.test(mcfg));
+  check('unlock: config quotes dangerous values (no YAML injection)',
+    /password: "user:pass"/.test(mcfg));
+  // 7 providers registered
+  check('unlock: all 7 providers registered', unlockLib.PROVIDERS.length === 7 &&
+    ['netflix', 'disney', 'youtube_premium', 'openai', 'gemini', 'claude', 'bahamut'].every((p) => unlockLib.PROVIDERS.includes(p)));
+  // Endpoint requires login
+  const unlockAnon = await req(port, 'GET', '/api/unlock', {});
+  check('unlock: /api/unlock requires login', unlockAnon.status === 401, 'got ' + unlockAnon.status);
+  const unlockUser = await login('UNLOCKUSER');
+  const unlockAuthed = json(await req(port, 'GET', '/api/unlock', { 'X-Session': unlockUser.session }));
+  check('unlock: /api/unlock returns provider list', unlockAuthed.ok === true &&
+    Array.isArray(unlockAuthed.providers) && unlockAuthed.providers.length === 7);
+
+  // 19. v1.5.15 (NEP): probeRequest CONNECT tunnel end-to-end via a mock proxy.
+  // The suite's section 18 only covers link parsing/config/auth; the tunnel
+  // itself (the riskiest new transport code) had no automated test.
+  const targetSrv = http.createServer((_rq, rs) => { rs.writeHead(200, { 'Content-Type': 'text/html' }); rs.end('<html>ad-free premium INNERTUBE_CONTEXT_GL":"US"</html>'); });
+  await new Promise((r) => targetSrv.listen(0, '127.0.0.1', r));
+  const mockProxy = http.createServer();
+  mockProxy.on('connect', (rq, sock) => {
+    const [h, pt] = String(rq.url || '').split(':');
+    const up = net.connect(Number(pt), h, () => { sock.write('HTTP/1.1 200 Connection Established\r\n\r\n'); sock.pipe(up); up.pipe(sock); });
+    up.on('error', () => { try { sock.end('HTTP/1.1 502 Bad Gateway\r\n\r\n'); } catch (e) {} });
+  });
+  await new Promise((r) => mockProxy.listen(0, '127.0.0.1', r));
+  const tp = targetSrv.address().port, pp = mockProxy.address().port;
+  const tun = await unlockLib.probeRequest(pp, 'http://127.0.0.1:' + tp + '/premium', { bodyLimit: 1024 * 1024 });
+  check('unlock: CONNECT tunnel returns 200 + markers', tun.status === 200 && /ad-free/.test(tun.body) && /"US"/.test(tun.rawBody || ''));
+  const dead = await unlockLib.probeRequest(1, 'http://127.0.0.1:' + tp + '/', {});
+  check('unlock: dead proxy returns clean error', !!dead.error && dead.status === 0);
+  targetSrv.close(); mockProxy.close();
 
   lib.server.close(); mockEmos.close(); mockProbe.close();
   try { fs.rmSync(tmp, { recursive: true, force: true }); } catch (e) { /* noop */ }

@@ -2,9 +2,9 @@
 
 EMOS 登录核验萝卜余额，**严格大于门槛（默认 500，可在后台改）**才能进控制台、领取每人专属的订阅链接。节点流量取自 1e.lol 探针的整机总流量，不做每人用量统计。
 
-当前版本：**v1.5.14**（2026-11-28，v1.5.13 补漏版）
+当前版本：**v1.5.15**（2026-11-28，节点解锁检测版）
 
-零依赖 Node.js（Node ≥ 18），不用 `npm install`。单文件 `server.js` + `config/` + `manage.sh`。
+零依赖 Node.js（Node ≥ 18），不用 `npm install`。`server.js` + `unlock.js`（解锁探测）+ `config/` + `manage.sh`。解锁检测需要额外的 mihomo 二进制（见下）。
 
 `config/nodes.json` 已被 git 忽略（后台保存后含真实节点凭证）。首次启动会自动从 `config/nodes.example.json` 生成一份 0600 的副本；升级不会覆盖它。
 
@@ -41,6 +41,28 @@ PORT=3000 ADMIN_TOKEN=你的口令 node server.js
 ```
 
 `update` 只更新代码文件，`.env` 和 `config/`（节点、设置）原样保留，更新前自动备份到 `backups/`（只留最近 10 个，权限 0600）。节点模板 `config/nodes.example.json` 随代码更新，真实 `nodes.json` 不参与版本控制。完整命令见 `./manage.sh help`。旧版 `manage.sh` 的 `update` 若报 `There is no tracking information`，先用 `curl -fsSL https://raw.githubusercontent.com/MechanicF/emos-sub/main/manage.sh -o manage.sh && chmod +x manage.sh && ./manage.sh update` 换新版再跑。
+
+## 节点解锁检测（v1.5.15）
+
+参考 [ZeroDeng01/sublinkPro](https://github.com/ZeroDeng01/sublinkPro) 的解锁检测实现，控制台节点表新增「解锁」列：点「解锁」展开该节点当前 7 项服务的可用状态（Netflix / Disney+ / YouTube Premium / OpenAI / Gemini / Claude / 巴哈姆特动画疯），带地区码与状态色标。
+
+**原理**：用独立的 mihomo 二进制为每个节点建立真实代理连接，从该出口发服务级探针，判定逻辑移植自 sublinkPro 的 `services/unlock/`。结果按节点 `key` 缓存到 `config/unlock.json`（0600、git 忽略），**每 24 小时后台全量刷新一次**，服务启动时也会延迟触发一次首检。控制台读的是缓存，不实时打节点，所以展开是秒开。
+
+**启用步骤**：
+
+```
+./manage.sh install-mihomo          # 从 GitHub Release 下载对应平台二进制到安装目录
+# 在 .env 中加：
+UNLOCK_ENABLED=1
+```
+
+可选环境变量：`MIHOMO_BIN`（二进制路径，默认安装目录下的 `mihomo`）、`MIHOMO_VERSION`（默认 `v1.19.11`）、`EMOS_UNLOCK_FILE`（结果文件，默认 `config/unlock.json`）。不设 `UNLOCK_ENABLED=1` 时功能完全关闭，不下载、不启动任何子进程。
+
+**注意**：
+- mihomo 是唯一的外部二进制依赖；Node 侧仍零依赖、不用 `npm install`
+- 探测走节点真实出口，节点不可用时该项标记 `error`，不影响订阅与流量功能
+- `partial` 表示部分能力（如仅官方原创内容）；节点不可用时该项标记 `error`
+- `manage.sh update` 会同步更新 `unlock.js`
 
 ## 怎么用
 
@@ -104,7 +126,11 @@ PORT=3000 ADMIN_TOKEN=你的口令 node server.js
 | `PROBE_FAIL_CACHE_MS` | 60000 | 探针失败后的负缓存时长（毫秒） |
 | `EMOS_STATE_FILE` | config/state.json | 会话/分享落盘位置 |
 | `ADMIN_LOGIN_MAX_FAILS` / `ADMIN_LOGIN_LOCK_MS` | 5 / 900000 | 后台口令连错次数与锁定时长（毫秒） |
-| `DEMO_ENABLED` | （空） | 仅测试：设 `1` 才允许演示登录 |
+| `DEMO_ENABLED` | （空） | 仅测试：设 `1` 才允许演示登录（`NODE_ENV=production` 时强制忽略） |
+| `UNLOCK_ENABLED` | （空） | 设 `1` 启用节点解锁检测（需先装 mihomo） |
+| `MIHOMO_BIN` | 安装目录/mihomo | mihomo 二进制路径 |
+| `MIHOMO_VERSION` | v1.19.11 | `install-mihomo` 下载的版本 |
+| `EMOS_UNLOCK_FILE` | config/unlock.json | 解锁结果缓存位置 |
 
 后台“设置”页可改门槛、有效期、命名规则、探针缓存，写 `settings.json` 立即生效。优先级：环境变量 > `settings.json` > 默认值。
 
@@ -192,7 +218,7 @@ curl -s -H 'X-Admin-Token: 你的口令' https://sub.example.com/api/admin/ip-ch
 - `GET /` 控制台；`GET /admin` 后台
 - `GET /auth/emos` → EMOS `/link` 登录；`GET /auth/emos/callback` → 回调核验
 - `POST /api/auth` 登录（接口保留供程序调用与回归测试，控制台不再提供粘贴 Token 入口）；`POST /api/logout` 退出
-- `GET /api/nodes` 节点 + 探针流量；`GET /api/sub-link` 当前订阅地址；`POST /api/sub/refresh` 轮换；`POST /api/sub/disable` 停用
+- `GET /api/nodes` 节点 + 探针流量；`GET /api/unlock` 节点解锁缓存（需登录）；`GET /api/sub-link` 当前订阅地址；`POST /api/sub/refresh` 轮换；`POST /api/sub/disable` 停用
 - `GET /c/?token=&client=`、`GET /sub/:token` 订阅内容；`GET /health` 健康检查；`GET /api/public-settings` 当前门槛
 - 后台：`POST /api/admin/login|logout`、`GET /api/admin/health`、`/api/admin/nodes`（增删改 + `/parse`、`/reorder`）、`/api/admin/shares`（刷新/停用/启用/吊销/全部吊销 `/revoke-all`）、`/api/admin/settings`、`GET /api/admin/ip-check`（反代来源 IP 诊断，需鉴权）
 - 辅助：`GET /api/auth/emos/login-url`、`GET /api/public-settings`；`X-Forwarded-Proto` 只接受 `http`/`https` 且仅信任代理来源
@@ -201,11 +227,12 @@ curl -s -H 'X-Admin-Token: 你的口令' https://sub.example.com/api/admin/ip-ch
 
 ```bash
 node test/check-pages.js   # 启动真服务跑回归（76 项）：实发页面脚本校验、订阅结构、限流、吊销流程、重启落盘等
-node test/check-fixes.js   # 安全回归（47 项）：身份绑定、吊销不可复活、门禁硬上限、XFP 白名单、413、探针标签、% 解析、事件委托、反代 IP、订阅不断链（v1.5.13）、会话过期不删分享 + 重登刷新过期分享（v1.5.14）
+node test/check-fixes.js   # 安全回归（57 项）：身份绑定、吊销不可复活、门禁硬上限、XFP 白名单、413、探针标签、% 解析、事件委托、反代 IP、订阅不断链（v1.5.13）、会话过期不删分享 + 重登刷新过期分享（v1.5.14）、解锁链接解析/配置生成/接口鉴权/CONNECT 隧道（v1.5.15）
 ```
 
 ## 版本历史
 
+- **v1.5.15**：节点解锁检测版 — 参考 sublinkPro 新增 7 项流媒体/AI 解锁检测（Netflix / Disney+ / YouTube Premium / OpenAI / Gemini / Claude / 巴哈姆特），用独立 mihomo 二进制建真实节点代理、Node 侧零依赖通过 CONNECT 隧道发探针；结果按节点 key 缓存到 `config/unlock.json`，每 24H 后台全量刷新；控制台节点表加「解锁」列，点击展开看状态/地区，`manage.sh install-mihomo` 下载二进制。NEP 优化：单节点内 7 项检测并行（Promise.all）；服务端退出时清理残留 mihomo 子进程；`install-mihomo` 增加 `-v` 自检（确认真是 mihomo 才留）；去掉从未返回的 `reachable` 状态；补 CONNECT 隧道端到端测试
 - **v1.5.14**：v1.5.13 补漏版 — 修 v1.5.13 漏掉的两处：会话过期时 `getSession()` 还在删分享（控制台 24 小时后一刷新就杀掉所有客户端链接），已去掉；分享 TTL 到期后重登复用旧 `expires_at` 造成永久 403 死锁，重登时刷新有效期。另加两处加固：`/auth/emos/callback` 补 30 次/10 分钟限流（每次命中调 2 次 EMOS）；`NODE_ENV=production` 时强制忽略 `DEMO_ENABLED=1` 并告警（演示登录绕过门槛）
 - **v1.5.13**：订阅不断链版 — 修“同一条链接 A 客户端更新后别的客户端 403”：分享默认永不过期（SHARE_TTL_HOURS 默认 0，原 24 小时）；链接不再绑定 24 小时登录会话（会话过期、退出登录都不杀链接）；重新登录复用同一条链接（系统停用的重新登录可恢复，用户/管理员停用的除外）；EMOS token 失效（401/403）改走 24 小时宽限而非立即吊销；宽限在每次取用时强制执行；后台分享表显示停用原因（用户/管理员/系统）；SESSION_TTL_MS 可配
 - **v1.5.12**：反代真实 IP 版 — 客户端 IP 从转发链右往左取（默认 1 级反代），伪造 XFF 前缀失效；支持 X-Real-IP / CF-Connecting-IP / True-Client-IP / Forwarded，`::ffff:` 与脏值规范化；新增 TRUST_PROXY_HOPS / TRUST_PROXY_IPS / CLIENT_IP_HEADER；后台「设置」Tab 加反代 IP 诊断（GET /api/admin/ip-check，需鉴权）；README 补 Nginx/Caddy 配置

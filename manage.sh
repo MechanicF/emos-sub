@@ -14,6 +14,7 @@
 #   ./manage.sh config             查看当前配置（ADMIN_TOKEN 只显示前 4 位）
 #   ./manage.sh set-token <口令>   改后台口令并重启
 #   ./manage.sh set-url <域名>     改公开访问域名（PUBLIC_URL，如 https://sub.example.com）并重启
+#   ./manage.sh install-mihomo     下载 mihomo 二进制用于节点解锁检测（再设 UNLOCK_ENABLED=1）
 #   ./manage.sh health             只测一次健康检查
 #   ./manage.sh help               帮助
 #
@@ -26,6 +27,7 @@
 #   --no-start          只安装，不启动
 #
 # 环境变量（也可替代选项）：EMOS_INSTALL_DIR、EMOS_PORT、EMOS_ADMIN_TOKEN、EMOS_PUBLIC_URL
+# 解锁检测：UNLOCK_ENABLED=1、MIHOMO_BIN=<路径>、MIHOMO_VERSION=<版本>、EMOS_UNLOCK_FILE=<结果文件>
 # 配置存在安装目录的 .env（600 权限），systemd 服务用它启动；无 systemd 的机器自动退回 nohup 后台运行。
 set -u
 PROG="${0##*/}"
@@ -262,7 +264,7 @@ cmd_update() {
   [ -f "$INSTALL_DIR/config/settings.json" ] && cp "$INSTALL_DIR/config/settings.json" "$keep/settings.json"
   # 只更新代码文件（不 pull、不 reset --hard，避免本地节点配置被冲掉；
   # 本地改过 server.js 等代码文件会被新版覆盖，改之前已备份）
-  (cd "$INSTALL_DIR" && git checkout origin/main -- server.js README.md manage.sh start.sh .gitignore config/templates config/nodes.example.json test) || { err "更新代码文件失败"; rm -rf "$keep"; return 1; }
+  (cd "$INSTALL_DIR" && git checkout origin/main -- server.js unlock.js README.md manage.sh start.sh .gitignore config/templates config/nodes.example.json test) || { err "更新代码文件失败"; rm -rf "$keep"; return 1; }
   [ -f "$keep/.env" ] && cp "$keep/.env" "$INSTALL_DIR/.env"
   [ -f "$keep/nodes.json" ] && cp "$keep/nodes.json" "$INSTALL_DIR/config/nodes.json"
   [ -f "$keep/settings.json" ] && cp "$keep/settings.json" "$INSTALL_DIR/config/settings.json"
@@ -295,6 +297,52 @@ cmd_set_url() {
   [ -f "$ENV_FILE" ] || { err "还没安装，先 ./manage.sh install"; return 1; }
   write_env PUBLIC_URL "$1"; say "公开域名已改成 $1，正在重启..."; do_stop; do_start
 }
+cmd_install_mihomo() {
+  # Download a mihomo binary for unlock detection. Installed to the app dir
+  # (or the current repo when not installed) and referenced by MIHOMO_BIN.
+  local target="${MIHOMO_BIN:-$INSTALL_DIR/mihomo}" version="${MIHOMO_VERSION:-v1.19.11}"
+  [ -f "$target" ] && { say "mihomo 已存在：$target（删除它或设 MIHOMO_BIN 指向别处可强制重装）"; return 0; }
+  need curl || return 1
+  local osn arch asset url tmp
+  case "$(uname -s 2>/dev/null)" in
+    Linux|linux) osn=linux;;
+    Darwin|darwin) osn=darwin;;
+    MINGW*|MSYS*|CYGWIN*|Windows_NT) osn=windows;;
+    *) err "未知系统 $(uname -s)，请手动下载 mihomo 并用 MIHOMO_BIN 指定"; return 1;;
+  esac
+  case "$(uname -m 2>/dev/null)" in
+    x86_64|amd64) arch=amd64;;
+    aarch64|arm64) arch=arm64;;
+    *) err "未知架构 $(uname -m)，请手动下载 mihomo 并用 MIHOMO_BIN 指定"; return 1;;
+  esac
+  asset="mihomo-${osn}-${arch}-compatible-${version}.gz"
+  [ "$osn" = "darwin" ] && asset="mihomo-${osn}-${arch}-${version}.gz"
+  url="https://github.com/MetaCubeX/mihomo/releases/download/${version}/${asset}"
+  tmp="$(mktemp)"
+  say "下载 mihomo $version ($osn/$arch) ..."
+  if ! curl -fL --retry 3 --max-time 180 -o "$tmp" "$url"; then
+    rm -f "$tmp"; err "下载失败：网络无法访问 GitHub Release。可在本地下载后 scp 到 $target"; return 1
+  fi
+  # gzip payload: decompress to target. Validate it starts with an ELF/MZ header.
+  if ! gzip -dc "$tmp" > "$target" 2>/dev/null; then
+    rm -f "$tmp" "$target"; err "解压失败，下载的文件可能已损坏"; return 1
+  fi
+  rm -f "$tmp"
+  chmod +x "$target" 2>/dev/null || true
+  local magic; magic="$(head -c 2 "$target" 2>/dev/null | od -An -tx1 | tr -d ' \n')"
+  case "$magic" in 7f45|4d5a) ;; *) err "二进制校验失败（magic=$magic），请删除 $target 后重试"; return 1;; esac
+  # Smoke test: it must actually run and identify as mihomo, not just any ELF.
+  local verout; verout="$(mktemp)"
+  if ! "$target" -v >"$verout" 2>&1; then rm -f "$target" "$verout"; err "mihomo 自检失败（无法运行），请删除 $target 后重试"; return 1; fi
+  if ! grep -qi mihomo "$verout"; then rm -f "$target" "$verout"; err "自检失败：下载的文件不是 mihomo，已删除 $target"; return 1; fi
+  rm -f "$verout"
+  say "mihomo 已安装：$target"
+  if [ -f "$ENV_FILE" ]; then
+    if ! grep -q '^MIHOMO_BIN=' "$ENV_FILE"; then write_env MIHOMO_BIN "$target"; say "已写入 .env：MIHOMO_BIN=$target"; fi
+  else
+    say "提示：设 UNLOCK_ENABLED=1 并在 .env 中加 MIHOMO_BIN=$target 以启用解锁检测"
+  fi
+}
 cmd_help() {
   sed -n '2,30p' "$0" | sed 's/^# //; s/^#//'
 }
@@ -315,6 +363,7 @@ case "${1:-help}" in
   config) cmd_config;;
   set-token) shift; cmd_set_token "${1:-}";;
   set-url) shift; cmd_set_url "${1:-}";;
+  install-mihomo) cmd_install_mihomo;;
   health) cmd_health;;
   help|--help|-h) cmd_help;;
   *) err "不认识的命令：$1"; cmd_help; exit 1;;

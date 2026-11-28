@@ -10,3 +10,7 @@ config/state.json
 backups/
 server.log
 .pid
+# Unlock detection: binary (large) and cached probe results.
+mihomo
+mihomo.exe
+config/unlock.json
