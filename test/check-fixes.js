@@ -464,6 +464,60 @@ if (process.argv.includes('-t')) { setInterval(() => {}, 1000); } else { process
   check('unlock progress: -t hang fails after ~10s, not forever',
     /timed out/.test(hangErr) && ht >= 9000 && ht < 20000, 'got ' + ht + 'ms: ' + hangErr.slice(0, 80));
 
+  // 22b. HTTPS requests must go through the CONNECT tunnel, never DIRECT.
+  // Regression: `https.request({createConnection, agent:false})` silently
+  // opened a direct socket on some Node versions, so every node's egress IP
+  // came back as the server's own IP. A proxy that rejects CONNECT with 502
+  // must produce proxy_connect_502 — if the request went direct it would
+  // instead reach the target and return 200.
+  const httpsTarget = http.createServer((_rq, rs) => { rs.writeHead(200); rs.end('DIRECT-LEAK'); });
+  await new Promise((r) => httpsTarget.listen(0, '127.0.0.1', r));
+  let connectSeen = 0;
+  const rejectProxy = http.createServer();
+  rejectProxy.on('connect', (_rq, sock) => { connectSeen += 1; try { sock.end('HTTP/1.1 502 Bad Gateway\r\n\r\n'); } catch (e) {} });
+  await new Promise((r) => rejectProxy.listen(0, '127.0.0.1', r));
+  const httpsRes = await unlockLib.probeRequest(rejectProxy.address().port,
+    'https://127.0.0.1:' + httpsTarget.address().port + '/', { timeout: 3000 });
+  check('unlock: HTTPS request is pinned to CONNECT tunnel (no DIRECT fallback)',
+    connectSeen === 1 && httpsRes.error === 'proxy_connect_502',
+    'connectSeen=' + connectSeen + ' error=' + (httpsRes.error || 'none') + ' status=' + httpsRes.status);
+  httpsTarget.close(); rejectProxy.close();
+
+  // 22c. The inner HTTPS request must actually travel through the CONNECT
+  // tunnel. 22b only covers a rejected CONNECT; the real leak was subtler:
+  // CONNECT succeeded (200) but the inner request opened its own DIRECT
+  // socket, so every node's egress IP came back as the server's own IP.
+  // A recording proxy counts the bytes that arrive on the tunnel after the
+  // CONNECT — if the request went direct, zero bytes arrive here.
+  let tunnelBytes = 0, tunnelConnects = 0;
+  const tunnelTarget = net.createServer((sock) => { sock.on('data', () => {}); sock.on('error', () => {}); setTimeout(() => { try { sock.destroy(); } catch (e) {} }, 300); });
+  await new Promise((r) => tunnelTarget.listen(0, '127.0.0.1', r));
+  const recProxy = net.createServer((clientSock) => {
+    let buf = Buffer.alloc(0);
+    clientSock.once('data', (chunk) => {
+      buf = Buffer.concat([buf, chunk]);
+      const m = /^CONNECT ([^ ]+) HTTP\/1\.1/i.exec(buf.toString('latin1'));
+      if (!m) { clientSock.destroy(); return; }
+      tunnelConnects += 1;
+      const [host, portStr] = m[1].split(':');
+      const up = net.connect(Number(portStr), host, () => {
+        clientSock.write('HTTP/1.1 200 Connection Established\r\n\r\n');
+        clientSock.pipe(up); up.pipe(clientSock);
+      });
+      clientSock.on('data', (c) => { tunnelBytes += c.length; });
+      clientSock.on('error', () => {});
+      up.on('error', () => {});
+    });
+    clientSock.on('error', () => {});
+  });
+  await new Promise((r) => recProxy.listen(0, '127.0.0.1', r));
+  await unlockLib.probeRequest(recProxy.address().port,
+    'https://127.0.0.1:' + tunnelTarget.address().port + '/', { timeout: 4000 });
+  check('unlock: inner HTTPS request travels through the CONNECT tunnel',
+    tunnelConnects === 1 && tunnelBytes > 0,
+    'connects=' + tunnelConnects + ' tunnelBytes=' + tunnelBytes);
+  tunnelTarget.close(); recProxy.close();
+
   // 23. probeRequest never hangs: an oversized body resolves with what was
   // collected (destroying the stream used to leave the promise pending
   // forever — that wedged a real run for 323s), and a slow drip that keeps

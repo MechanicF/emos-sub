@@ -4,6 +4,7 @@
 'use strict';
 const http = require('http');
 const https = require('https');
+const tls = require('tls');
 const net = require('net');
 const fs = require('fs');
 const os = require('os');
@@ -176,39 +177,61 @@ function probeRequest(proxyPort, targetUrl, opts) {
       req.on('connect', (res, tunnelSocket) => {
         socket = tunnelSocket;
         if (res.statusCode !== 200) return done({ status: 0, url: currentUrl, body: '', error: 'proxy_connect_' + res.statusCode });
-        const target = u.protocol === 'https:' ? https : http;
-        const treq = target.request({
-          host: u.hostname, port, path: u.pathname + u.search, method,
-          headers, createConnection: () => tunnelSocket, agent: false,
-        });
-        treq.setTimeout(timeoutMs, () => { treq.destroy(new Error('timeout')); });
-        treq.on('response', (tres) => {
-          let size = 0;
-          const limit = opts.bodyLimit || 1024 * 1024;
-          const chunks = [];
-          tres.on('data', (c) => {
-            size += c.length;
-            if (size <= limit) { chunks.push(c); return; }
-            // Body past the cap: resolve with what was collected. Merely
-            // destroying the stream never settles this promise (see the
-            // overall cap above) — that was the 323s wedge.
-            const raw = Buffer.concat(chunks).toString('utf8');
-            done({ status: tres.statusCode, url: currentUrl, finalUrl: currentUrl, body: raw.toLowerCase(), rawBody: raw, headers: tres.headers, truncated: true });
+
+        // The inner HTTP request must be pinned to the CONNECT socket. For
+        // HTTPS, wrap the raw tunnel in an explicit TLS session first: passing
+        // `createConnection` to https.request with `agent:false` silently used
+        // a DIRECT connection on some Node versions (tunnel opened to mihomo,
+        // but the actual request bypassed it -> every node reported the
+        // server's own egress IP). tls.connect({socket: tunnel}) guarantees
+        // the bytes travel through the proxy.
+        const sendRequest = (wire) => {
+          // Bind the request to the tunnel via a dedicated Agent whose
+          // createConnection returns our socket. `createConnection` passed as
+          // a request option with `agent:false` is ignored by some Node
+          // versions -> the request opens its own DIRECT socket.
+          const wireAgent = new http.Agent({ keepAlive: false });
+          wireAgent.createConnection = () => wire;
+          const treq = http.request({
+            host: u.hostname, port, path: u.pathname + u.search, method,
+            headers, agent: wireAgent,
           });
-          tres.on('end', () => {
-            const raw = Buffer.concat(chunks).toString('utf8');
-            const loc = tres.headers.location;
-            if (loc && [301, 302, 303, 307, 308].includes(tres.statusCode) && redirects < maxRedirects) {
-              redirects += 1;
-              return run(new URL(loc, currentUrl).toString());
-            }
-            done({ status: tres.statusCode, url: currentUrl, finalUrl: currentUrl, body: raw.toLowerCase(), rawBody: raw, headers: tres.headers });
+          treq.on('close', () => { try { wireAgent.destroy(); } catch (e) {} });
+          treq.setTimeout(timeoutMs, () => { treq.destroy(new Error('timeout')); });
+          treq.on('response', (tres) => {
+            let size = 0;
+            const limit = opts.bodyLimit || 1024 * 1024;
+            const chunks = [];
+            tres.on('data', (c) => {
+              size += c.length;
+              if (size <= limit) { chunks.push(c); return; }
+              const raw = Buffer.concat(chunks).toString('utf8');
+              done({ status: tres.statusCode, url: currentUrl, finalUrl: currentUrl, body: raw.toLowerCase(), rawBody: raw, headers: tres.headers, truncated: true });
+            });
+            tres.on('end', () => {
+              const raw = Buffer.concat(chunks).toString('utf8');
+              const loc = tres.headers.location;
+              if (loc && [301, 302, 303, 307, 308].includes(tres.statusCode) && redirects < maxRedirects) {
+                redirects += 1;
+                return run(new URL(loc, currentUrl).toString());
+              }
+              done({ status: tres.statusCode, url: currentUrl, finalUrl: currentUrl, body: raw.toLowerCase(), rawBody: raw, headers: tres.headers });
+            });
+            tres.on('error', (e) => done({ status: 0, url: currentUrl, body: '', error: e.message }));
           });
-          tres.on('error', (e) => done({ status: 0, url: currentUrl, body: '', error: e.message }));
-        });
-        treq.on('error', (e) => done({ status: 0, url: currentUrl, body: '', error: e.message }));
-        if (body) treq.write(body);
-        treq.end();
+          treq.on('error', (e) => done({ status: 0, url: currentUrl, body: '', error: e.message }));
+          if (body) treq.write(body);
+          treq.end();
+        };
+
+        if (u.protocol === 'https:') {
+          const tlsSock = tls.connect({ socket: tunnelSocket, servername: u.hostname });
+          socket = tlsSock;
+          tlsSock.once('secureConnect', () => sendRequest(tlsSock));
+          tlsSock.once('error', (e) => done({ status: 0, url: currentUrl, body: '', error: 'tls_' + e.message }));
+        } else {
+          sendRequest(tunnelSocket);
+        }
       });
       req.on('timeout', () => { req.destroy(new Error('connect_timeout')); });
       req.on('error', (e) => done({ status: 0, url: currentUrl, body: '', error: e.message }));
