@@ -384,16 +384,27 @@ class MihomoProxy {
     // Validate first: mihomo exits with code 2 on an invalid config, and a
     // bare "exited with 2" tells the operator nothing. `-t` prints the exact
     // yaml/field error to stderr; surface it instead of swallowing it.
+    // Bound it: a binary that hangs on -t used to wedge the whole run
+    // forever (no timeout), leaving the UI stuck on "检测中…" with no way
+    // to tell. Kill it after 10s and fail loudly instead.
     const test = spawn(this.binary, ['-d', this.dir, '-t', '-f', cfgPath], {
       stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
     });
     let testErr = '';
-    if (test.stderr) test.stderr.on('data', (c) => { testErr += c.toString(); });
-    if (test.stdout) test.stdout.on('data', (c) => { testErr += c.toString(); });
+    if (test.stderr) test.stderr.on('data', (c) => { testErr += c.toString(); if (testErr.length > 4000) testErr = testErr.slice(-4000); });
+    if (test.stdout) test.stdout.on('data', (c) => { testErr += c.toString(); if (testErr.length > 4000) testErr = testErr.slice(-4000); });
+    let testTimedOut = false;
+    const testTimer = setTimeout(() => {
+      testTimedOut = true;
+      try { test.kill('SIGKILL'); } catch (e) {}
+    }, 10000);
     const testCode = await new Promise((resolve) => {
-      test.on('error', (e) => { testErr += e.message; resolve(-1); });
-      test.on('close', (code) => resolve(code));
+      test.on('error', (e) => { clearTimeout(testTimer); testErr += e.message; resolve(-1); });
+      test.on('close', (code) => { clearTimeout(testTimer); resolve(code); });
     });
+    if (testTimedOut) {
+      throw new Error('mihomo config test timed out after 10s — the binary did not exit on -t (hung or incompatible)');
+    }
     if (testCode !== 0) {
       throw new Error('mihomo config invalid (exit ' + testCode + '): ' + (testErr.trim().slice(0, 600) || 'no details'));
     }
@@ -465,7 +476,12 @@ async function runUnlockCheck(nodes, binary, opts) {
   if (!usable.length) return out;
   const mihomo = new MihomoProxy(binary, usable.map((x) => x.proxy), opts);
   try {
+    // Startup phase: -t validation + process spawn can take seconds and used
+    // to be invisible (the UI just said "检测中…"). Report it so a stall
+    // here is distinguishable from a stall on a node.
+    if (opts.onProgress) opts.onProgress(null, 'starting');
     await mihomo.start();
+    if (opts.onProgress) opts.onProgress(null, 'started');
     for (const { node } of usable) {
       if (opts.onProgress) opts.onProgress(node.key, 'checking');
       const selected = await mihomo.select(node.key);

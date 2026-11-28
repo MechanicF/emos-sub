@@ -364,6 +364,7 @@ const check = (name, cond, extra) => { if (cond) { console.log('OK   ' + name); 
   const AH = { 'X-Admin-Token': 'test-token', 'Content-Type': 'application/json' };
   const cst0 = json(await req(CTRL_PORT, 'GET', '/api/unlock', CH));
   check('unlock control: console can still read state', cst0.available === true && cst0.enabled === true);
+  check('unlock progress: state includes progress field', 'progress' in cst0);
   const cAnonGet = await req(CTRL_PORT, 'GET', '/api/unlock', {});
   check('unlock control: state read requires login', cAnonGet.status === 401, 'got ' + cAnonGet.status);
   const cTogConsole = await req(CTRL_PORT, 'POST', '/api/unlock/toggle', CH, { enabled: false });
@@ -398,6 +399,70 @@ const check = (name, cond, extra) => { if (cond) { console.log('OK   ' + name); 
   check('unlock: mihomo is invoked with -f, not -c',
     /'-f'/.test(startSrc) && !/'-c'/.test(startSrc),
     'mihomo has no -c flag; -f specifies the config file');
+
+  // 22. unlock progress: runUnlockCheck reports starting/started/per-node
+  // events, and a binary that hangs on -t fails after 10s instead of
+  // wedging the run forever.
+  const fakeSrc = `#!/usr/bin/env node
+'use strict';
+// Minimal fake mihomo: -t exits 0, -v prints a version, run mode answers
+// CONNECT with 200 then drops the socket (checkers fail fast) and serves
+// the external controller (PUT /proxies/PROXY -> 204).
+const fs=require('fs'),net=require('net'),http=require('http');
+const args=process.argv.slice(2);
+let cfg=null,test=false,ver=false;
+for(let i=0;i<args.length;i++){
+  if(args[i]==='-f')cfg=args[++i];
+  else if(args[i]==='-t')test=true;
+  else if(args[i]==='-v')ver=true;
+}
+if(ver){console.log('Mihomo Meta v1.19.11');process.exit(0);}
+if(!cfg){console.error('no config');process.exit(2);}
+let text='';try{text=fs.readFileSync(cfg,'utf8');}catch(e){process.exit(2);}
+if(test)process.exit(0);
+const mixed=Number((/mixed-port:\\s*(\\d+)/.exec(text)||[])[1]);
+const ctrl=Number((/external-controller:\\s*127\\.0\\.0\\.1:(\\d+)/.exec(text)||[])[1]||(mixed+1));
+const mixedSrv=net.createServer((sock)=>{
+  sock.once('data',()=>{
+    sock.write('HTTP/1.1 200 Connection Established'+String.fromCharCode(13,10,13,10));
+    sock.destroy();
+  });
+  sock.on('error',()=>{});
+});
+mixedSrv.listen(mixed,'127.0.0.1');
+const ctrlSrv=http.createServer((req,res)=>{
+  if(req.method==='PUT'&&req.url==='/proxies/PROXY'){req.resume();res.writeHead(204);res.end();return;}
+  res.writeHead(200,{'Content-Type':'application/json'});res.end('{"name":"PROXY"}');
+});
+ctrlSrv.listen(ctrl,'127.0.0.1');
+process.on('SIGTERM',()=>{try{mixedSrv.close();ctrlSrv.close();}catch(e){}process.exit(0);});
+`;
+  const fakeBin = path.join(tmp, 'fake-mihomo');
+  fs.writeFileSync(fakeBin, fakeSrc, { mode: 0o755 });
+  const events = [];
+  const pout = await unlockLib.runUnlockCheck([
+    { key: 'p-node-1', link: 'hy2://u:p@example.com:443?sni=example.com', region: 'US' },
+    { key: 'p-node-2', link: 'hy2://u:p@example.com:443?sni=example.com', region: 'US' },
+  ], fakeBin, { onProgress: (key, status) => events.push([key, status]) });
+  const seq = events.map((e) => (e[0] || '') + ':' + e[1]).join(',');
+  check('unlock progress: events run starting->started->checking->done per node',
+    seq === ':starting,:started,p-node-1:checking,p-node-1:done,p-node-2:checking,p-node-2:done', 'got ' + seq);
+  check('unlock progress: done nodes carry 7 providers',
+    pout['p-node-1'] && pout['p-node-1'].providers && Object.keys(pout['p-node-1'].providers).length === 7);
+  // -t timeout: a binary that never exits on -t must fail after ~10s, not hang.
+  const hangSrc = `#!/usr/bin/env node
+'use strict';
+if (process.argv.includes('-t')) { setInterval(() => {}, 1000); } else { process.exit(0); }
+`;
+  const hangBin = path.join(tmp, 'fake-mihomo-hang');
+  fs.writeFileSync(hangBin, hangSrc, { mode: 0o755 });
+  const hangProxy = new unlockLib.MihomoProxy(hangBin, [unlockLib.linkToProxy('hy2://u:p@example.com:443?sni=example.com', 'h-node')], {});
+  const ht0 = Date.now();
+  let hangErr = '';
+  try { await hangProxy.start(); } catch (e) { hangErr = e.message; } finally { try { hangProxy.stop(); } catch (e) {} }
+  const ht = Date.now() - ht0;
+  check('unlock progress: -t hang fails after ~10s, not forever',
+    /timed out/.test(hangErr) && ht >= 9000 && ht < 20000, 'got ' + ht + 'ms: ' + hangErr.slice(0, 80));
 
   lib.server.close(); mockEmos.close(); mockProbe.close();
   try { fs.rmSync(tmp, { recursive: true, force: true }); } catch (e) { /* noop */ }

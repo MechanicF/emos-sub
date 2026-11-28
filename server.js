@@ -1,4 +1,4 @@
-// EMOS-gated sing-box gateway v1.5.18 — zero dependencies.
+// EMOS-gated sing-box gateway v1.5.19 — zero dependencies.
 // Node >= 18 (uses global fetch). Run: node server.js  (PORT env, default 3000)
 // Scope: EMOS login -> carrot > 500 -> console (nodes + per-user sub links)
 // + NODE TOTAL traffic only, from https://1e.lol/api/nodes. NO per-user traffic.
@@ -28,7 +28,7 @@ const net = require('net');
 const unlockLib = require('./unlock');
 
 const PORT = parseInt(process.env.PORT || '3000', 10);
-const VERSION = '1.5.18';
+const VERSION = '1.5.19';
 const CONFIG_PATH = path.join(__dirname, 'config', 'nodes.json');
 const CLASH_TEMPLATE_PATH = path.join(__dirname, 'config', 'templates', 'clash.yaml');
 const SINGBOX_TEMPLATE_PATH = path.join(__dirname, 'config', 'templates', 'singbox.json');
@@ -64,6 +64,12 @@ const MIHOMO_BIN = process.env.MIHOMO_BIN || path.join(__dirname, 'mihomo');
 let unlockData = { updatedAt: null, results: {} };   // key -> {providers|error, updatedAt}
 let unlockRunning = false;
 let unlockLastError = null;
+// Live progress of the current (or most recent) scan, so the UI can show
+// which node is being checked and how long it has taken instead of a bare
+// "检测中…". Null until the first run starts. Shape: { phase, startedAt,
+// finishedAt, currentKey, currentIndex, total, done, failed, nodeStartedAt,
+// lastUpdateAt, error }. `phase` is starting|checking|finished|failed.
+let unlockProgress = null;
 // Runtime on/off switch persisted alongside results, so a console user can
 // disable detection without an env change/restart. Defaults to UNLOCK_ENABLED.
 let unlockRuntimeEnabled = UNLOCK_ENABLED;
@@ -106,7 +112,7 @@ function unlockPublic() {
   }
   return { ok: true, enabled: unlockRuntimeEnabled, available: UNLOCK_ENABLED,
     running: unlockRunning, updatedAt: unlockData.updatedAt, lastError: unlockLastError,
-    providers: unlockLib.PROVIDERS, results };
+    progress: unlockProgress, providers: unlockLib.PROVIDERS, results };
 }
 // Scheduled/timer entry: honours the runtime switch + concurrency guard.
 async function runUnlock() {
@@ -126,14 +132,39 @@ async function doUnlock() {
   const nodes = NODES.map((n) => ({ key: n.key, link: n.link || n.hy2_link || null, region: n.region || n.country || '' }));
   if (!nodes.length) return;
   unlockLastError = null;
+  unlockProgress = { phase: 'starting', startedAt: Date.now(), finishedAt: null,
+    currentKey: null, currentIndex: 0, total: nodes.length, done: 0, failed: 0,
+    nodeStartedAt: null, lastUpdateAt: Date.now(), error: null };
+  const bump = (key, status, result) => {
+    const p = unlockProgress, now = Date.now();
+    if (!p) return;
+    if (status === 'starting') p.phase = 'starting';
+    else if (status === 'started') p.phase = 'checking';
+    else if (status === 'checking') {
+      p.phase = 'checking'; p.currentKey = key; p.currentIndex = p.done + 1; p.nodeStartedAt = now;
+    } else if (status === 'done' || status === 'error') {
+      p.done += 1; p.currentIndex = p.done; p.nodeStartedAt = null;
+      if (status === 'error' || (result && result.error)) p.failed += 1;
+    }
+    p.lastUpdateAt = now;
+  };
   try {
-    const results = await unlockLib.runUnlockCheck(nodes, MIHOMO_BIN, { timeout: 8000 });
+    const results = await unlockLib.runUnlockCheck(nodes, MIHOMO_BIN, { timeout: 8000, onProgress: bump });
     unlockData.results = results;
     unlockData.updatedAt = new Date().toISOString();
     atomicWriteUnlock();
+    if (unlockProgress) {
+      unlockProgress.phase = 'finished'; unlockProgress.finishedAt = Date.now();
+      unlockProgress.currentKey = null; unlockProgress.nodeStartedAt = null;
+      unlockProgress.lastUpdateAt = Date.now();
+    }
     console.log('Unlock check complete for ' + Object.keys(results).length + ' nodes');
   } catch (e) {
     unlockLastError = e.message;
+    if (unlockProgress) {
+      unlockProgress.phase = 'failed'; unlockProgress.finishedAt = Date.now();
+      unlockProgress.error = e.message; unlockProgress.lastUpdateAt = Date.now();
+    }
     console.error('Unlock check failed:', e.message);
   }
 }
@@ -2266,6 +2297,7 @@ const ADMIN_HTML = `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8
 <div class="table-scroll"><table><thead><tr><th>Key</th><th>名称</th><th>到期</th><th>协议</th><th>服务器</th><th>探针</th><th>操作</th></tr></thead><tbody id="nodeRows"></tbody></table></div>
 <h2 style="margin-top:20px">解锁检测</h2>
 <p class="muted" id="unlockAdminNote"></p>
+<div class="bar" id="unlockProgressBar" style="display:none"><i style="width:0%"></i></div>
 <div class="actions unlock-controls"><button type="button" class="ghost" id="btnUnlockToggle">解锁检测：开启</button> <button type="button" class="ghost" id="btnUnlockRun">立即检测</button></div>
 <p id="unlockAdminMsg" class="msg"></p>
 <h2 id="formTitle">添加节点</h2>
@@ -2393,6 +2425,23 @@ async function loadAll(){
   await loadShares();await loadSettings();await loadHealth();await loadUnlockAdmin();
 }
 var unlockAdminState={};
+// Human-readable scan progress: which node, how far, how long — so a stall
+// is visible instead of a bare "检测中…". A node taking >30s gets flagged
+// as possibly stuck (worst case is ~4 sequential 8s probe timeouts).
+function unlockProgressText(j){
+  var p=j.progress;
+  if(!p)return '';
+  var secs=function(a,b){return Math.max(0,Math.round(((b||Date.now())-a)/1000))};
+  if(p.phase==='starting')return '检测中… 正在启动 mihomo（校验配置），已用时 '+secs(p.startedAt)+' 秒';
+  if(p.phase==='checking'){
+    var s='检测中 '+p.currentIndex+'/'+p.total+'：'+(p.currentKey||'')+'（已完成 '+p.done+' 个，失败 '+p.failed+' 个），已用时 '+secs(p.startedAt)+' 秒';
+    if(p.nodeStartedAt&&Date.now()-p.nodeStartedAt>30000)s+='（当前节点已 '+secs(p.nodeStartedAt)+' 秒，可能卡住）';
+    return s;
+  }
+  if(p.phase==='finished')return '已完成 '+p.done+'/'+p.total+'（失败 '+p.failed+' 个），用时 '+secs(p.startedAt,p.finishedAt)+' 秒';
+  if(p.phase==='failed')return '检测失败：'+(p.error||'未知错误');
+  return '';
+}
 async function loadUnlockAdmin(){
   var r=await api('GET','/api/unlock');
   if(r.status!==200)return;
@@ -2401,9 +2450,19 @@ async function loadUnlockAdmin(){
   var n=document.getElementById('unlockAdminNote');
   if(n){
     if(!j.available){n.textContent='解锁检测未启用：服务器环境变量 UNLOCK_ENABLED 未设为 1（需重启服务）。';}
-    else if(j.running){n.textContent='解锁检测进行中… 完成后自动刷新。';}
+    else if(j.running){n.textContent=unlockProgressText(j)||'解锁检测进行中… 完成后自动刷新。';}
     else if(!j.enabled){n.textContent='解锁检测已关闭：24H 定时和立即检测都不再运行。';}
-    else{n.textContent='解锁检测已开启，每 24 小时后台更新，上次 '+(j.updatedAt?new Date(j.updatedAt).toLocaleString():'尚未完成')+(j.lastError?'（最近错误：'+j.lastError+'）':'');}
+    else{
+      var base='解锁检测已开启，每 24 小时后台更新，上次 '+(j.updatedAt?new Date(j.updatedAt).toLocaleString():'尚未完成')+(j.lastError?'（最近错误：'+j.lastError+'）':'');
+      var pt=unlockProgressText(j);
+      n.textContent=(pt&&j.progress&&(j.progress.phase==='finished'||j.progress.phase==='failed'))?base+'；'+pt:base;
+    }
+  }
+  var bar=document.getElementById('unlockProgressBar');
+  if(bar){
+    var pct=(j.progress&&j.progress.total)?Math.round(j.progress.done/j.progress.total*100):0;
+    var fill=bar.querySelector('i');if(fill)fill.style.width=pct+'%';
+    bar.style.display=j.running?'':'none';
   }
   var t=document.getElementById('btnUnlockToggle');
   if(t){t.textContent='解锁检测：'+(j.enabled?'开启':'关闭');t.disabled=!j.available;}
@@ -2422,12 +2481,14 @@ document.getElementById('btnUnlockRun').onclick=async function(){
   if(!r.json.ok&&r.status!==409){document.getElementById('unlockAdminMsg').textContent='启动检测失败：'+(r.json.error||r.status);return}
   document.getElementById('unlockAdminMsg').textContent='';
   await loadUnlockAdmin();
-  // Poll until the background scan finishes, then refresh the status.
+  // Poll until the background scan finishes, refreshing the progress line
+  // on every tick — polling without re-rendering is what left the note
+  // frozen on "检测中…" with a 0-second elapsed time.
   var ticks=0;
   var timer=setInterval(async function(){
-    var q=await api('GET','/api/unlock');
+    await loadUnlockAdmin();
     ticks+=1;
-    if(!q.json.running||ticks>120){clearInterval(timer);await loadUnlockAdmin();}
+    if(!unlockAdminState.running||ticks>120)clearInterval(timer);
   },1000);
 };
 // 先探一次后台健康状态再决定显示什么：已登录直接进后台；未配置显示
@@ -2597,6 +2658,20 @@ document.getElementById("nodeRows").addEventListener("click",function(e){
   var b=e.target.closest("button[data-act=\\"unlock\\"]");
   if(b)toggleUnlock(b.getAttribute("data-unlock-key"));
 });
+function unlockProgressText(j){
+  var p=j.progress;
+  if(!p)return '';
+  var secs=function(a,b){return Math.max(0,Math.round(((b||Date.now())-a)/1000))};
+  if(p.phase==='starting')return '检测中… 正在启动 mihomo（校验配置），已用时 '+secs(p.startedAt)+' 秒';
+  if(p.phase==='checking'){
+    var s='检测中 '+p.currentIndex+'/'+p.total+'：'+(p.currentKey||'')+'（已完成 '+p.done+' 个，失败 '+p.failed+' 个），已用时 '+secs(p.startedAt)+' 秒';
+    if(p.nodeStartedAt&&Date.now()-p.nodeStartedAt>30000)s+='（当前节点已 '+secs(p.nodeStartedAt)+' 秒，可能卡住）';
+    return s;
+  }
+  if(p.phase==='finished')return '已完成 '+p.done+'/'+p.total+'（失败 '+p.failed+' 个），用时 '+secs(p.startedAt,p.finishedAt)+' 秒';
+  if(p.phase==='failed')return '检测失败：'+(p.error||'未知错误');
+  return '';
+}
 async function loadUnlock(){
   try{
     var r=await fetch("/api/unlock",{credentials:"include",headers:session?{"X-Session":session}:{}});
@@ -2607,9 +2682,13 @@ async function loadUnlock(){
     var n=document.getElementById("unlockNote");
     if(n){
       if(!j.available){n.textContent="解锁检测未启用：服务器环境变量 UNLOCK_ENABLED 未设为 1（需重启服务）";}
-      else if(j.running){n.textContent="解锁检测进行中… 完成后节点表会自动刷新。";}
+      else if(j.running){n.textContent=unlockProgressText(j)||"解锁检测进行中… 完成后节点表会自动刷新。";}
       else if(!j.enabled){n.textContent="解锁检测已关闭，每 24 小时不会再更新。";}
-      else{n.textContent="解锁检测已开启，每 24 小时后台更新，上次 "+(j.updatedAt?new Date(j.updatedAt).toLocaleString():"尚未完成")+(j.lastError?"（最近错误："+j.lastError+"）":"");}
+      else{
+        var base="解锁检测已开启，每 24 小时后台更新，上次 "+(j.updatedAt?new Date(j.updatedAt).toLocaleString():"尚未完成")+(j.lastError?"（最近错误："+j.lastError+"）":"");
+        var pt=unlockProgressText(j);
+        n.textContent=(pt&&j.progress&&(j.progress.phase==="finished"||j.progress.phase==="failed"))?base+"；"+pt:base;
+      }
     }
   }catch(e){}
 }
