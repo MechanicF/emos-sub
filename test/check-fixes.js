@@ -376,10 +376,16 @@ const check = (name, cond, extra) => { if (cond) { console.log('OK   ' + name); 
   ctrlSrv.kill('SIGTERM');
 
   // 21. config validation surfaces mihomo's real error instead of bare exit code.
+  // Regression guard for the -c bug: mihomo has no -c flag at all (the config
+  // file flag is -f), so a -c in start() breaks every check on a real binary.
+  const startSrc = unlockLib.MihomoProxy.prototype.start.toString();
   check('unlock: config error includes validator details',
     typeof unlockLib.MihomoProxy.prototype.start === 'function' &&
-    /config invalid/.test(unlockLib.MihomoProxy.prototype.start.toString()),
+    /config invalid/.test(startSrc),
     'start() should run -t and embed stderr');
+  check('unlock: mihomo is invoked with -f, not -c',
+    /'-f'/.test(startSrc) && !/'-c'/.test(startSrc),
+    'mihomo has no -c flag; -f specifies the config file');
 
   lib.server.close(); mockEmos.close(); mockProbe.close();
   try { fs.rmSync(tmp, { recursive: true, force: true }); } catch (e) { /* noop */ }

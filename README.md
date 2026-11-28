@@ -2,7 +2,7 @@
 
 EMOS 登录核验萝卜余额，**严格大于门槛（默认 500，可在后台改）**才能进控制台、领取每人专属的订阅链接。节点流量取自 1e.lol 探针的整机总流量，不做每人用量统计。
 
-当前版本：**v1.5.16**（2026-11-28，解锁控制台开关版）
+当前版本：**v1.5.17**（2026-11-28，修 mihomo -f 参数版）
 
 零依赖 Node.js（Node ≥ 18），不用 `npm install`。`server.js` + `unlock.js`（解锁探测）+ `config/` + `manage.sh`。解锁检测需要额外的 mihomo 二进制（见下）。
 
@@ -231,11 +231,12 @@ curl -s -H 'X-Admin-Token: 你的口令' https://sub.example.com/api/admin/ip-ch
 
 ```bash
 node test/check-pages.js   # 启动真服务跑回归（76 项）：实发页面脚本校验、订阅结构、限流、吊销流程、重启落盘等
-node test/check-fixes.js   # 安全回归（64 项）：身份绑定、吊销不可复活、门禁硬上限、XFP 白名单、413、探针标签、% 解析、事件委托、反代 IP、订阅不断链（v1.5.13）、会话过期不删分享 + 重登刷新过期分享（v1.5.14）、解锁链接解析/配置生成/接口鉴权/CONNECT 隧道（v1.5.15）、开关与立即检测（v1.5.16）
+node test/check-fixes.js   # 安全回归（65 项）：身份绑定、吊销不可复活、门禁硬上限、XFP 白名单、413、探针标签、% 解析、事件委托、反代 IP、订阅不断链（v1.5.13）、会话过期不删分享 + 重登刷新过期分享（v1.5.14）、解锁链接解析/配置生成/接口鉴权/CONNECT 隧道（v1.5.15）、开关与立即检测（v1.5.16）、mihomo -f 参数防退化（v1.5.17）
 ```
 
 ## 版本历史
 
+- **v1.5.17**：修 mihomo -f 参数版 — mihomo 根本没有 `-c` 参数，指定配置文件是 `-f`；v1.5.15 起两处 spawn（`-t` 校验和主启动）都写了 `-c`，真机上检测一直报 exit 2，v1.5.16 的诊断只是把这个错误原文暴露了出来。两处改成 `-f`，并用真 mihomo v1.19.11 实测 `-t` 校验与全量检测通过；回归测试加 `-f` 防退化断言
 - **v1.5.16**：解锁控制台开关版 — 控制台加解锁检测开关与「立即检测」按钮（开关状态写 `config/unlock.json` 持久化，`UNLOCK_ENABLED` 仍是总闸；立即检测触发后前端每秒轮询直到完成）；mihomo 启动前用 `-t` 校验配置并把 stderr 原文带进错误，修掉 `exited with 2` 无诊断信息的问题；去掉部分版本拒绝的空 short-id；runUnlock 拆出 doUnlock，修立即检测的 running 竞态
 - **v1.5.15**：节点解锁检测版 — 参考 sublinkPro 新增 7 项流媒体/AI 解锁检测（Netflix / Disney+ / YouTube Premium / OpenAI / Gemini / Claude / 巴哈姆特），用独立 mihomo 二进制建真实节点代理、Node 侧零依赖通过 CONNECT 隧道发探针；结果按节点 key 缓存到 `config/unlock.json`，每 24H 后台全量刷新；控制台节点表加「解锁」列，点击展开看状态/地区，`manage.sh install-mihomo` 下载二进制。NEP 优化：单节点内 7 项检测并行（Promise.all）；服务端退出时清理残留 mihomo 子进程；`install-mihomo` 增加 `-v` 自检（确认真是 mihomo 才留）；去掉从未返回的 `reachable` 状态；补 CONNECT 隧道端到端测试
 - **v1.5.14**：v1.5.13 补漏版 — 修 v1.5.13 漏掉的两处：会话过期时 `getSession()` 还在删分享（控制台 24 小时后一刷新就杀掉所有客户端链接），已去掉；分享 TTL 到期后重登复用旧 `expires_at` 造成永久 403 死锁，重登时刷新有效期。另加两处加固：`/auth/emos/callback` 补 30 次/10 分钟限流（每次命中调 2 次 EMOS）；`NODE_ENV=production` 时强制忽略 `DEMO_ENABLED=1` 并告警（演示登录绕过门槛）

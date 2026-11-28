@@ -384,7 +384,7 @@ class MihomoProxy {
     // Validate first: mihomo exits with code 2 on an invalid config, and a
     // bare "exited with 2" tells the operator nothing. `-t` prints the exact
     // yaml/field error to stderr; surface it instead of swallowing it.
-    const test = spawn(this.binary, ['-d', this.dir, '-t', '-c', cfgPath], {
+    const test = spawn(this.binary, ['-d', this.dir, '-t', '-f', cfgPath], {
       stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
     });
     let testErr = '';
@@ -398,7 +398,7 @@ class MihomoProxy {
       throw new Error('mihomo config invalid (exit ' + testCode + '): ' + (testErr.trim().slice(0, 600) || 'no details'));
     }
 
-    this.proc = spawn(this.binary, ['-d', this.dir, '-c', cfgPath], {
+    this.proc = spawn(this.binary, ['-d', this.dir, '-f', cfgPath], {
       stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true,
     });
     activeProxies.add(this);
