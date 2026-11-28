@@ -1,4 +1,4 @@
-// EMOS-gated sing-box gateway v1.5.15 — zero dependencies.
+// EMOS-gated sing-box gateway v1.5.16 — zero dependencies.
 // Node >= 18 (uses global fetch). Run: node server.js  (PORT env, default 3000)
 // Scope: EMOS login -> carrot > 500 -> console (nodes + per-user sub links)
 // + NODE TOTAL traffic only, from https://1e.lol/api/nodes. NO per-user traffic.
@@ -28,7 +28,7 @@ const net = require('net');
 const unlockLib = require('./unlock');
 
 const PORT = parseInt(process.env.PORT || '3000', 10);
-const VERSION = '1.5.15';
+const VERSION = '1.5.16';
 const CONFIG_PATH = path.join(__dirname, 'config', 'nodes.json');
 const CLASH_TEMPLATE_PATH = path.join(__dirname, 'config', 'templates', 'clash.yaml');
 const SINGBOX_TEMPLATE_PATH = path.join(__dirname, 'config', 'templates', 'singbox.json');
@@ -64,11 +64,15 @@ const MIHOMO_BIN = process.env.MIHOMO_BIN || path.join(__dirname, 'mihomo');
 let unlockData = { updatedAt: null, results: {} };   // key -> {providers|error, updatedAt}
 let unlockRunning = false;
 let unlockLastError = null;
+// Runtime on/off switch persisted alongside results, so a console user can
+// disable detection without an env change/restart. Defaults to UNLOCK_ENABLED.
+let unlockRuntimeEnabled = UNLOCK_ENABLED;
 
 function atomicWriteUnlock() {
   try {
     fs.mkdirSync(path.dirname(UNLOCK_PATH), { recursive: true });
     const tmp = UNLOCK_PATH + '.tmp-' + process.pid;
+    unlockData.enabled = unlockRuntimeEnabled;
     fs.writeFileSync(tmp, JSON.stringify(unlockData, null, 2), { mode: 0o600 });
     fs.renameSync(tmp, UNLOCK_PATH);
     try { fs.chmodSync(UNLOCK_PATH, 0o600); } catch (e) { /* Windows */ }
@@ -79,6 +83,7 @@ function loadUnlock() {
     const doc = JSON.parse(fs.readFileSync(UNLOCK_PATH, 'utf8'));
     if (doc && typeof doc === 'object' && doc.results && typeof doc.results === 'object') {
       unlockData = { updatedAt: doc.updatedAt || null, results: doc.results };
+      if (typeof doc.enabled === 'boolean') unlockRuntimeEnabled = doc.enabled;
     }
   } catch (e) { /* first run or unreadable — start empty */ }
 }
@@ -99,12 +104,20 @@ function unlockPublic() {
     }
     results[key] = out;
   }
-  return { ok: true, enabled: UNLOCK_ENABLED, running: unlockRunning,
-    updatedAt: unlockData.updatedAt, lastError: unlockLastError,
+  return { ok: true, enabled: unlockRuntimeEnabled, available: UNLOCK_ENABLED,
+    running: unlockRunning, updatedAt: unlockData.updatedAt, lastError: unlockLastError,
     providers: unlockLib.PROVIDERS, results };
 }
+// Scheduled/timer entry: honours the runtime switch + concurrency guard.
 async function runUnlock() {
-  if (!UNLOCK_ENABLED || unlockRunning) return;
+  if (!UNLOCK_ENABLED || !unlockRuntimeEnabled || unlockRunning) return;
+  unlockRunning = true;
+  try { await doUnlock(); }
+  finally { unlockRunning = false; }
+}
+// Actual scan. Sets no flags itself so the manual endpoint can mark `running`
+// before returning (avoids a false "finished" on the client's first poll).
+async function doUnlock() {
   if (!fs.existsSync(MIHOMO_BIN)) {
     unlockLastError = 'mihomo binary not found at ' + MIHOMO_BIN + ' — run ./manage.sh install-mihomo';
     console.error('Unlock check skipped:', unlockLastError);
@@ -112,7 +125,6 @@ async function runUnlock() {
   }
   const nodes = NODES.map((n) => ({ key: n.key, link: n.link || n.hy2_link || null, region: n.region || n.country || '' }));
   if (!nodes.length) return;
-  unlockRunning = true;
   unlockLastError = null;
   try {
     const results = await unlockLib.runUnlockCheck(nodes, MIHOMO_BIN, { timeout: 8000 });
@@ -123,8 +135,6 @@ async function runUnlock() {
   } catch (e) {
     unlockLastError = e.message;
     console.error('Unlock check failed:', e.message);
-  } finally {
-    unlockRunning = false;
   }
 }
 
@@ -2103,6 +2113,8 @@ h1,h2,h3{font-weight:500}
 .card h2 .count{color:var(--muted);font-family:var(--mono);font-size:12px}
 .muted{color:var(--muted);font-size:13px}
 .bad{color:var(--negative)}.ok{color:var(--positive)}.warn{color:var(--warning)}
+.unlock-controls{display:flex;gap:8px;flex-wrap:wrap}
+.unlock-controls button{padding:8px 12px;font-size:12px}
 .unlock-tags{display:flex;flex-wrap:wrap;gap:6px}
 .utag{display:inline-flex;align-items:center;gap:5px;font-size:11px;font-family:var(--mono);padding:3px 8px;border-radius:999px;border:1px solid var(--line);background:var(--raised);color:var(--text-2);white-space:nowrap}
 .utag.available{color:var(--positive);border-color:var(--positive)}
@@ -2480,7 +2492,7 @@ const HTML = `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><met
 <div class="stat"><div class="k">节点</div><div class="v" id="statNodes">—</div><div class="s">订阅内容</div></div>
 <div class="stat"><div class="k">订阅访问</div><div class="v" id="statAccess">—</div><div class="s">本条链接</div></div>
 </div>
-<div class="card"><h2>节点 · 总流量</h2><div class="table-scroll node-table"><table><thead><tr><th>节点</th><th>到期</th><th>状态</th><th>今日</th><th>本月已用 / 限额</th><th>解锁</th></tr></thead><tbody id="nodeRows"><tr><td colspan="6" class="muted">正在载入节点…</td></tr></tbody></table></div><p class="muted" id="unlockNote" style="margin-top:12px"></p></div>
+<div class="card"><div class="section-head"><h2>节点 · 总流量</h2><div class="unlock-controls"><button type="button" class="ghost" id="btnUnlockToggle">解锁检测：开启</button><button type="button" class="ghost" id="btnUnlockRun">立即检测</button></div></div><div class="table-scroll node-table"><table><thead><tr><th>节点</th><th>到期</th><th>状态</th><th>今日</th><th>本月已用 / 限额</th><th>解锁</th></tr></thead><tbody id="nodeRows"><tr><td colspan="6" class="muted">正在载入节点…</td></tr></tbody></table></div><p class="muted" id="unlockNote" style="margin-top:12px"></p></div>
 <div class="card"><h2>订阅链接</h2><p>用户：<code id="who"></code> · 萝卜：<b id="carrotOut"></b>（门槛 &gt; <span class="th">500</span>）</p>
 <p class="muted">订阅链接（每人专属，粘贴到客户端即可）：</p>
 <div class="sub-row"><span class="lbl">订阅地址</span><code id="subAuto"></code><button type="button" id="btnCopyAuto">复制</button></div>
@@ -2548,11 +2560,45 @@ async function loadUnlock(){
     var r=await fetch("/api/unlock",{credentials:"include",headers:session?{"X-Session":session}:{}});
     if(!r.ok)return;
     var j=await r.json();
-    if(j.ok){unlockState=j;var n=document.getElementById("unlockNote");if(n){
-      n.textContent=j.enabled?("解锁检测：每 24 小时后台更新，上次 "+(j.updatedAt?new Date(j.updatedAt).toLocaleString():"尚未完成")+(j.lastError?"（"+j.lastError+"）":"")):"解锁检测未启用（设 UNLOCK_ENABLED=1 并安装 mihomo 后可用）";
-    }}
+    if(!j.ok)return;
+    unlockState=j;
+    var n=document.getElementById("unlockNote");
+    if(n){
+      if(!j.available){n.textContent="解锁检测未启用：服务器环境变量 UNLOCK_ENABLED 未设为 1（需重启服务）";}
+      else if(j.running){n.textContent="解锁检测进行中… 完成后节点表会自动刷新。";}
+      else if(!j.enabled){n.textContent="解锁检测已关闭（点上方按钮开启，或每 24 小时不会再更新）。";}
+      else{n.textContent="解锁检测已开启，每 24 小时后台更新，上次 "+(j.updatedAt?new Date(j.updatedAt).toLocaleString():"尚未完成")+(j.lastError?"（最近错误："+j.lastError+"）":"");}
+    }
+    var t=document.getElementById("btnUnlockToggle");
+    if(t){t.textContent="解锁检测："+(j.enabled?"开启":"关闭");t.disabled=!j.available;if(j.enabled)t.classList.remove("danger");else t.classList.add("danger");}
+    var b=document.getElementById("btnUnlockRun");
+    if(b){b.disabled=!j.available||!j.enabled||!!j.running;b.textContent=j.running?"检测中…":"立即检测";}
   }catch(e){}
 }
+function unlockHeaders(){return session?{"X-Session":session,"Content-Type":"application/json"}:{}}
+var btnToggle=document.getElementById("btnUnlockToggle");
+if(btnToggle)btnToggle.onclick=async function(){
+  var want=!unlockState.enabled;
+  var r=await fetch("/api/unlock/toggle",{method:"POST",credentials:"include",headers:unlockHeaders(),body:JSON.stringify({enabled:want})});
+  var j={};try{j=await r.json()}catch(e){}
+  if(!j.ok){showMsg("切换解锁检测失败："+(j.error||r.status));return}
+  await loadUnlock();
+};
+var btnRun=document.getElementById("btnUnlockRun");
+if(btnRun)btnRun.onclick=async function(){
+  var r=await fetch("/api/unlock/run",{method:"POST",credentials:"include",headers:unlockHeaders(),body:"{}"});
+  var j={};try{j=await r.json()}catch(e){}
+  if(!j.ok&&r.status!==409){showMsg("启动检测失败："+(j.error||r.status));return}
+  await loadUnlock();
+  // Poll until the background scan finishes, then refresh cached results.
+  var ticks=0;
+  var timer=setInterval(async function(){
+    var q=await fetch("/api/unlock",{credentials:"include",headers:unlockHeaders()});
+    var s={};try{s=await q.json()}catch(e){}
+    ticks+=1;
+    if(!s.running||ticks>120){clearInterval(timer);await loadUnlock();await loadNodes();}
+  },1000);
+};
 async function loadNodes(){
   var r;
   try{r=await fetch("/api/nodes",{credentials:"include",headers:session?{"X-Session":session}:{}});}
@@ -2656,6 +2702,28 @@ const server = http.createServer(async (req, res) => {
       if (!getSession(req)) return sendJson(res, 401, { ok: false, error: 'login required' });
       return sendJson(res, 200, unlockPublic());
     }
+    // Console controls: toggle detection and trigger an immediate scan.
+    if (req.method === 'POST' && u.pathname === '/api/unlock/toggle') {
+      if (!getSession(req)) return sendJson(res, 401, { ok: false, error: 'login required' });
+      if (!UNLOCK_ENABLED) return sendJson(res, 400, { ok: false, error: 'unlock detection is disabled by environment (UNLOCK_ENABLED=0)' });
+      let body;
+      try { body = await readBody(req); } catch (e) { return sendJson(res, e.status || 400, { ok: false, error: e.message }); }
+      unlockRuntimeEnabled = body.enabled === undefined ? !unlockRuntimeEnabled : !!body.enabled;
+      atomicWriteUnlock();
+      return sendJson(res, 200, { ok: true, enabled: unlockRuntimeEnabled });
+    }
+    if (req.method === 'POST' && u.pathname === '/api/unlock/run') {
+      if (!getSession(req)) return sendJson(res, 401, { ok: false, error: 'login required' });
+      if (!UNLOCK_ENABLED || !unlockRuntimeEnabled) return sendJson(res, 400, { ok: false, error: 'unlock detection is off' });
+      if (!fs.existsSync(MIHOMO_BIN)) return sendJson(res, 400, { ok: false, error: 'mihomo binary not found — run ./manage.sh install-mihomo' });
+      if (unlockRunning) return sendJson(res, 409, { ok: false, error: 'a detection is already running' });
+      // Mark running BEFORE returning so the client's first poll cannot see
+      // a false "finished" while the process is still validating config.
+      unlockRunning = true;
+      // Fire and forget: the client polls GET /api/unlock for `running=false`.
+      doUnlock().catch((e) => { unlockLastError = e.message; }).finally(() => { unlockRunning = false; });
+      return sendJson(res, 202, { ok: true, started: true });
+    }
     if (req.method === 'GET' && u.pathname === '/api/sub-link') return await handleSubLink(req, res);
     if (req.method === 'POST' && u.pathname === '/api/sub/refresh') return await handleSubRefresh(req, res);
     if (req.method === 'POST' && u.pathname === '/api/sub/disable') return await handleSubDisable(req, res);
@@ -2700,5 +2768,5 @@ const HTML_RENDERED = HTML.split('{{VERSION}}').join(VERSION);
 const ADMIN_HTML_RENDERED = ADMIN_HTML.split('{{VERSION}}').join(VERSION);
 
 // Pure helpers exported for test/check-pages.js unit tests (no server started).
-module.exports = { server, monthEndExpireMs, normalizeExpiry, validateProbeId, parseHy2, parseVless, resolveClientIp, pickClientIp, normalizeIp, ipDiagnostics, safeDecode, unlockPublic, runUnlock, VERSION };
+module.exports = { server, monthEndExpireMs, normalizeExpiry, validateProbeId, parseHy2, parseVless, resolveClientIp, pickClientIp, normalizeIp, ipDiagnostics, safeDecode, unlockPublic, runUnlock, doUnlock, VERSION };
 

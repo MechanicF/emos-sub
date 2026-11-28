@@ -91,7 +91,8 @@ function yamlProxyEntry(p) {
   if (p['reality-opts']) {
     lines.push('    reality-opts:');
     lines.push('      public-key: ' + yamlQuote(p['reality-opts']['public-key'] || ''));
-    lines.push('      short-id: ' + yamlQuote(p['reality-opts']['short-id'] || ''));
+    // An empty short-id is rejected by some mihomo versions; omit it.
+    if (p['reality-opts']['short-id']) lines.push('      short-id: ' + yamlQuote(p['reality-opts']['short-id']));
   }
   if (p['ws-opts']) {
     lines.push('    ws-opts:');
@@ -377,14 +378,36 @@ class MihomoProxy {
     this.port = 20000 + Math.floor(Math.random() * 15000);
     this.controller = this.port + 1;
     const cfg = buildMihomoConfig(this.proxies, this.port, this.controller);
-    fs.writeFileSync(path.join(this.dir, 'config.yaml'), cfg, { mode: 0o600 });
-    this.proc = spawn(this.binary, ['-d', this.dir, '-c', path.join(this.dir, 'config.yaml')], {
+    const cfgPath = path.join(this.dir, 'config.yaml');
+    fs.writeFileSync(cfgPath, cfg, { mode: 0o600 });
+
+    // Validate first: mihomo exits with code 2 on an invalid config, and a
+    // bare "exited with 2" tells the operator nothing. `-t` prints the exact
+    // yaml/field error to stderr; surface it instead of swallowing it.
+    const test = spawn(this.binary, ['-d', this.dir, '-t', '-c', cfgPath], {
+      stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
+    });
+    let testErr = '';
+    if (test.stderr) test.stderr.on('data', (c) => { testErr += c.toString(); });
+    if (test.stdout) test.stdout.on('data', (c) => { testErr += c.toString(); });
+    const testCode = await new Promise((resolve) => {
+      test.on('error', (e) => { testErr += e.message; resolve(-1); });
+      test.on('close', (code) => resolve(code));
+    });
+    if (testCode !== 0) {
+      throw new Error('mihomo config invalid (exit ' + testCode + '): ' + (testErr.trim().slice(0, 600) || 'no details'));
+    }
+
+    this.proc = spawn(this.binary, ['-d', this.dir, '-c', cfgPath], {
       stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true,
     });
     activeProxies.add(this);
-    this.proc.stderr.on('data', () => {});
+    // Keep stderr so a startup failure reports the real reason (port clash,
+    // bad field, missing geo data) rather than just an exit code.
+    let stderr = '';
+    this.proc.stderr.on('data', (c) => { stderr += c.toString(); if (stderr.length > 4000) stderr = stderr.slice(-4000); });
     for (let i = 0; i < 60; i++) {
-      if (this.proc.exitCode !== null) throw new Error('mihomo exited with ' + this.proc.exitCode);
+      if (this.proc.exitCode !== null) throw new Error('mihomo exited with ' + this.proc.exitCode + ': ' + (stderr.trim() || 'no stderr'));
       const ok = await new Promise((resolve) => {
         const s = net.connect(this.port, '127.0.0.1');
         s.setTimeout(300);
@@ -395,7 +418,7 @@ class MihomoProxy {
       if (ok) return;
       await new Promise((r) => setTimeout(r, 150));
     }
-    throw new Error('mihomo failed to start within 9s');
+    throw new Error('mihomo failed to start within 9s: ' + (stderr.trim() || 'no stderr'));
   }
   // Select which proxy the PROXY group routes through.
   async select(name) {

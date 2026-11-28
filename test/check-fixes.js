@@ -342,6 +342,45 @@ const check = (name, cond, extra) => { if (cond) { console.log('OK   ' + name); 
   check('unlock: dead proxy returns clean error', !!dead.error && dead.status === 0);
   targetSrv.close(); mockProxy.close();
 
+  // 20. console controls: enable/disable switch + immediate scan endpoint.
+  const CTRL_PORT = 3232;
+  const ctrlState = path.join(tmp, 'ctrl-state.json');
+  const ctrlUnlock = path.join(tmp, 'ctrl-unlock.json');
+  const ctrlEnv = { ...process.env, PORT: String(CTRL_PORT), DEMO_ENABLED: '1',
+    UNLOCK_ENABLED: '1', EMOS_STATE_FILE: ctrlState, EMOS_UNLOCK_FILE: ctrlUnlock };
+  const ctrlSrv = spawn(process.execPath, [path.join(__dirname, '..', 'server.js')],
+    { cwd: path.join(__dirname, '..'), env: ctrlEnv, stdio: ['ignore', 'pipe', 'pipe'] });
+  ctrlSrv.stderr.on('data', () => {});
+  for (let i = 0; i < 60; i++) {
+    const h = await req(CTRL_PORT, 'GET', '/health', {});
+    if (h.status === 200) break;
+    await sleep(100);
+  }
+  const cl = json(await req(CTRL_PORT, 'POST', '/api/auth', {}, { carrot: 600 }));
+  const CH = { 'X-Session': cl.session, 'Content-Type': 'application/json' };
+  const cst0 = json(await req(CTRL_PORT, 'GET', '/api/unlock', CH));
+  check('unlock control: available and enabled by default', cst0.available === true && cst0.enabled === true);
+  const coff = json(await req(CTRL_PORT, 'POST', '/api/unlock/toggle', CH, { enabled: false }));
+  check('unlock control: toggle off succeeds', coff.ok === true && coff.enabled === false);
+  const cst1 = json(await req(CTRL_PORT, 'GET', '/api/unlock', CH));
+  check('unlock control: disabled state persists', cst1.enabled === false);
+  const crawOff = await req(CTRL_PORT, 'POST', '/api/unlock/run', CH, {});
+  check('unlock control: immediate scan rejected while off', crawOff.status === 400, 'got ' + crawOff.status);
+  json(await req(CTRL_PORT, 'POST', '/api/unlock/toggle', CH, { enabled: true }));
+  const craw = await req(CTRL_PORT, 'POST', '/api/unlock/run', CH, {});
+  // No mihomo binary in test env -> must be a clean 400 with a clear reason.
+  check('unlock control: immediate scan reports missing mihomo clearly', craw.status === 400 &&
+    /mihomo/.test(json(craw).error || ''), 'got ' + craw.status + ' ' + craw.body.slice(0, 80));
+  const ctrlAnon = await req(CTRL_PORT, 'POST', '/api/unlock/toggle', {}, { enabled: false });
+  check('unlock control: toggle requires login', ctrlAnon.status === 401, 'got ' + ctrlAnon.status);
+  ctrlSrv.kill('SIGTERM');
+
+  // 21. config validation surfaces mihomo's real error instead of bare exit code.
+  check('unlock: config error includes validator details',
+    typeof unlockLib.MihomoProxy.prototype.start === 'function' &&
+    /config invalid/.test(unlockLib.MihomoProxy.prototype.start.toString()),
+    'start() should run -t and embed stderr');
+
   lib.server.close(); mockEmos.close(); mockProbe.close();
   try { fs.rmSync(tmp, { recursive: true, force: true }); } catch (e) { /* noop */ }
   console.log('\ncheck-fixes: ' + pass + ' passed, ' + fail + ' failed');
