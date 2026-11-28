@@ -542,6 +542,27 @@ if (process.argv.includes('-t')) { setInterval(() => {}, 1000); } else { process
     /failed to start within 1s/.test(slowErr) && /mixed-port \d+/.test(slowErr) && /still running/.test(slowErr) && st >= 1900 && st < 10000,
     'got ' + st + 'ms: ' + slowErr.slice(0, 140));
 
+  // 27. egress IP is masked and fetched per node (v1.5.24): real runs showed
+  // every node with the last node's IP, and the full address must never
+  // reach the browser. maskIp keeps the network part (203.0.113.*) so nodes
+  // stay distinguishable; unlockPublic applies it, so the API only ever
+  // returns the masked form. The IP is also fetched first, alone, right
+  // after the node's select — not in parallel with the provider burst.
+  check('unlock: egress IP is masked for display (IPv4)',
+    unlockLib.maskIp('203.0.113.45') === '203.0.113.*', 'got ' + unlockLib.maskIp('203.0.113.45'));
+  check('unlock: egress IP is masked for display (IPv6)',
+    unlockLib.maskIp('2001:db8:85a3:8d3:1319:8a2e:370:7348') === '2001:db8:85a3:8d3:*',
+    'got ' + unlockLib.maskIp('2001:db8:85a3:8d3:1319:8a2e:370:7348'));
+  check('unlock: maskIp leaves non-IPs alone',
+    unlockLib.maskIp(null) === null && unlockLib.maskIp('not-an-ip') === 'not-an-ip');
+  const srvSrc = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  check('unlock: API returns the masked IP, never the full one',
+    /unlockLib\.maskIp\(v\.ip\)/.test(srvSrc) && !/out\.ip = v\.ip;/.test(srvSrc));
+  const cnpSrc = unlockLib.checkNodeOnProxy.toString();
+  check('unlock: egress IP is fetched before the provider probes',
+    cnpSrc.indexOf('checkEgressIp(port)') !== -1 &&
+    cnpSrc.indexOf('checkEgressIp(port)') < cnpSrc.indexOf('Promise.all(PROVIDERS.map'));
+
   lib.server.close(); mockEmos.close(); mockProbe.close();
   try { fs.rmSync(tmp, { recursive: true, force: true }); } catch (e) { /* noop */ }
   console.log('\ncheck-fixes: ' + pass + ' passed, ' + fail + ' failed');

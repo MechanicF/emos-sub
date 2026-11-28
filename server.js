@@ -1,4 +1,4 @@
-// EMOS-gated sing-box gateway v1.5.23 — zero dependencies.
+// EMOS-gated sing-box gateway v1.5.24 — zero dependencies.
 // Node >= 18 (uses global fetch). Run: node server.js  (PORT env, default 3000)
 // Scope: EMOS login -> carrot > 500 -> console (nodes + per-user sub links)
 // + NODE TOTAL traffic only, from https://1e.lol/api/nodes. NO per-user traffic.
@@ -28,7 +28,7 @@ const net = require('net');
 const unlockLib = require('./unlock');
 
 const PORT = parseInt(process.env.PORT || '3000', 10);
-const VERSION = '1.5.23';
+const VERSION = '1.5.24';
 const CONFIG_PATH = path.join(__dirname, 'config', 'nodes.json');
 const CLASH_TEMPLATE_PATH = path.join(__dirname, 'config', 'templates', 'clash.yaml');
 const SINGBOX_TEMPLATE_PATH = path.join(__dirname, 'config', 'templates', 'singbox.json');
@@ -99,7 +99,7 @@ function unlockPublic() {
     // strip anything that could carry node credentials; expose only status
     const out = { updatedAt: v && v.updatedAt ? v.updatedAt : null };
     if (v && v.error) out.error = v.error;
-    if (v && v.ip) out.ip = v.ip;
+    if (v && v.ip) out.ip = unlockLib.maskIp(v.ip); // masked: full IP never leaves the server
     if (v && v.providers) {
       out.providers = {};
       for (const [prov, r] of Object.entries(v.providers)) {
