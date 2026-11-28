@@ -507,6 +507,25 @@ if (process.argv.includes('-t')) { setInterval(() => {}, 1000); } else { process
     serverSrc.includes("if((st==='error'||st==='unknown')&&r.reason)h+=' <small>'+esc(r.reason)+'</small>';"),
     'reason rendering missing from unlockTagsHtml');
 
+  // 25. egress IP: checkNodeOnProxy records the IP the node exits from
+  // (v1.5.22), so identical results across nodes can be traced to a shared
+  // egress. Same mock-CONNECT-proxy shape as section 19, with a fake ipify
+  // server as the tunnel target.
+  const fakeIpify = http.createServer((_rq, rs) => { rs.writeHead(200, { 'Content-Type': 'text/plain' }); rs.end('203.0.113.7'); });
+  await new Promise((r) => fakeIpify.listen(0, '127.0.0.1', r));
+  const ipifyProxy = http.createServer();
+  ipifyProxy.on('connect', (rq, sock) => {
+    const [h, pt] = String(rq.url || '').split(':');
+    const up = net.connect(Number(pt), h, () => { sock.write('HTTP/1.1 200 Connection Established\r\n\r\n'); sock.pipe(up); up.pipe(sock); });
+    up.on('error', () => { try { sock.end('HTTP/1.1 502 Bad Gateway\r\n\r\n'); } catch (e) {} });
+  });
+  await new Promise((r) => ipifyProxy.listen(0, '127.0.0.1', r));
+  const egressIp = await unlockLib.checkEgressIp(ipifyProxy.address().port, 'http://127.0.0.1:' + fakeIpify.address().port + '/');
+  check('unlock: egress IP is read through the node proxy', egressIp === '203.0.113.7', 'got ' + egressIp);
+  const deadIp = await unlockLib.checkEgressIp(1);
+  check('unlock: egress IP is null when the probe fails', deadIp === null, 'got ' + deadIp);
+  fakeIpify.close(); ipifyProxy.close();
+
   lib.server.close(); mockEmos.close(); mockProbe.close();
   try { fs.rmSync(tmp, { recursive: true, force: true }); } catch (e) { /* noop */ }
   console.log('\ncheck-fixes: ' + pass + ' passed, ' + fail + ' failed');

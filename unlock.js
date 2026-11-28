@@ -463,17 +463,34 @@ class MihomoProxy {
   }
 }
 
+// The egress IP this node exits from, as seen by an IP-echo service
+// through the same proxy. Different nodes in different places should show
+// different IPs; if they don't, the nodes share an egress (or a link).
+// `url` is only overridden in tests (a local plain-HTTP echo server).
+async function checkEgressIp(port, url) {
+  try {
+    const r = await probeRequest(port, url || 'https://api.ipify.org/', { timeout: 5000, bodyLimit: 64 });
+    if (r.error) return null;
+    const ip = String(r.body || '').trim();
+    if (/^(\d{1,3}\.){3}\d{1,3}$/.test(ip) || /^[0-9a-fA-F:]{3,45}$/.test(ip)) return ip;
+    return null;
+  } catch (e) { return null; }
+}
+
 // Probe every provider for a single node. Caller must have selected the node
 // in the shared mihomo instance (see runUnlockCheck). The 7 providers are
 // independent (different services, read-only shared state), so they run in
 // parallel — a full node finishes in ~one checker instead of the sum of all.
 async function checkNodeOnProxy(port, node, opts) {
   const p = { port, landingCountry: String(node.region || node.country || '').toUpperCase().slice(0, 2) };
-  const entries = await Promise.all(PROVIDERS.map(async (provider) => {
-    try { return [provider, await CHECKERS[provider](p)]; }
-    catch (e) { return [provider, res(provider, 'error', { reason: e.message })]; }
-  }));
-  return { providers: Object.fromEntries(entries), updatedAt: new Date().toISOString() };
+  const [entries, ip] = await Promise.all([
+    Promise.all(PROVIDERS.map(async (provider) => {
+      try { return [provider, await CHECKERS[provider](p)]; }
+      catch (e) { return [provider, res(provider, 'error', { reason: e.message })]; }
+    })),
+    checkEgressIp(port),
+  ]);
+  return { providers: Object.fromEntries(entries), ip: ip || null, updatedAt: new Date().toISOString() };
 }
 
 // Full check: one mihomo process, iterate nodes by selecting each in turn.
@@ -522,6 +539,6 @@ async function runUnlockCheck(nodes, binary, opts) {
 }
 
 module.exports = {
-  PROVIDERS, linkToProxy, yamlProxyEntry, buildMihomoConfig, probeRequest, checkNodeOnProxy, runUnlockCheck, MihomoProxy, stopAllMihomo,
+  PROVIDERS, linkToProxy, yamlProxyEntry, buildMihomoConfig, probeRequest, checkNodeOnProxy, checkEgressIp, runUnlockCheck, MihomoProxy, stopAllMihomo,
   checkNetflix, checkDisney, checkYoutubePremium: checkYoutube, checkOpenai, checkGemini, checkClaude, checkBahamut,
 };
