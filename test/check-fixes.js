@@ -445,8 +445,8 @@ process.on('SIGTERM',()=>{try{mixedSrv.close();ctrlSrv.close();}catch(e){}proces
     { key: 'p-node-2', link: 'hy2://u:p@example.com:443?sni=example.com', region: 'US' },
   ], fakeBin, { onProgress: (key, status) => events.push([key, status]) });
   const seq = events.map((e) => (e[0] || '') + ':' + e[1]).join(',');
-  check('unlock progress: events run starting->started->checking->done per node',
-    seq === ':starting,:started,p-node-1:checking,p-node-1:done,p-node-2:checking,p-node-2:done', 'got ' + seq);
+  check('unlock progress: events run starting->checking->done per node',
+    seq === ':starting,p-node-1:checking,p-node-1:done,p-node-2:checking,p-node-2:done', 'got ' + seq);
   check('unlock progress: done nodes carry 7 providers',
     pout['p-node-1'] && pout['p-node-1'].providers && Object.keys(pout['p-node-1'].providers).length === 7);
   // -t timeout: a binary that never exits on -t must fail after ~10s, not hang.
@@ -544,14 +544,14 @@ if (process.argv.includes('-t')) { setInterval(() => {}, 1000); } else { process
 
   // 27. egress IP is masked and fetched per node (v1.5.24): real runs showed
   // every node with the last node's IP, and the full address must never
-  // reach the browser. maskIp keeps the network part (203.0.113.*) so nodes
+  // reach the browser. maskIp keeps the network part (203.0.*.*) so nodes
   // stay distinguishable; unlockPublic applies it, so the API only ever
   // returns the masked form. The IP is also fetched first, alone, right
   // after the node's select — not in parallel with the provider burst.
   check('unlock: egress IP is masked for display (IPv4)',
-    unlockLib.maskIp('203.0.113.45') === '203.0.113.*', 'got ' + unlockLib.maskIp('203.0.113.45'));
+    unlockLib.maskIp('203.0.113.45') === '203.0.*.*', 'got ' + unlockLib.maskIp('203.0.113.45'));
   check('unlock: egress IP is masked for display (IPv6)',
-    unlockLib.maskIp('2001:db8:85a3:8d3:1319:8a2e:370:7348') === '2001:db8:85a3:8d3:*',
+    unlockLib.maskIp('2001:db8:85a3:8d3:1319:8a2e:370:7348') === '2001:db8:*',
     'got ' + unlockLib.maskIp('2001:db8:85a3:8d3:1319:8a2e:370:7348'));
   check('unlock: maskIp leaves non-IPs alone',
     unlockLib.maskIp(null) === null && unlockLib.maskIp('not-an-ip') === 'not-an-ip');
@@ -562,6 +562,31 @@ if (process.argv.includes('-t')) { setInterval(() => {}, 1000); } else { process
   check('unlock: egress IP is fetched before the provider probes',
     cnpSrc.indexOf('checkEgressIp(port)') !== -1 &&
     cnpSrc.indexOf('checkEgressIp(port)') < cnpSrc.indexOf('Promise.all(PROVIDERS.map'));
+
+  // 28. per-node mihomo (v1.5.25): the shared select group let every node
+  // come back with the same egress IP on real runs (all 10 showed the
+  // server's own 209.205.228.* instead of each node's own address). Each
+  // node now gets its own mihomo holding only that node's proxy, so its
+  // traffic cannot go through any other node. A recording fake mihomo logs
+  // the proxy names in each config it is started with.
+  const rucSrc = unlockLib.runUnlockCheck.toString();
+  check('unlock: each node gets its own mihomo, no shared select',
+    /new MihomoProxy\(binary, \[proxy\]/.test(rucSrc) && !/\.select\(/.test(rucSrc));
+  const recLog = path.join(tmp, 'mihomo-configs.log');
+  try { fs.unlinkSync(recLog); } catch (e) {}
+  const recSrc = `#!/usr/bin/env node\n'use strict';\nconst fs=require('fs'),net=require('net');\nconst args=process.argv.slice(2);\nlet cfg=null,test=false;\nfor(let i=0;i<args.length;i++){ if(args[i]==='-f')cfg=args[++i]; else if(args[i]==='-t')test=true; }\nif(!cfg)process.exit(2);\nlet text='';try{text=fs.readFileSync(cfg,'utf8');}catch(e){process.exit(2);}\nif(test)process.exit(0);\nconst head=text.split('proxy-groups:')[0];\nconst names=[...head.matchAll(/- name: (.+)/g)].map((m)=>m[1].trim());\nfs.appendFileSync(process.env.REC_LOG, names.join(',')+'\\n');\nconst mixed=Number((/mixed-port:\\s*(\\d+)/.exec(text)||[])[1]);\nconst srv=net.createServer((sock)=>{ sock.once('data',()=>{ sock.write('HTTP/1.1 200 Connection Established'+String.fromCharCode(13,10,13,10)); sock.destroy(); }); sock.on('error',()=>{}); });\nsrv.listen(mixed,'127.0.0.1');\nprocess.on('SIGTERM',()=>{ try{srv.close();}catch(e){} process.exit(0); });\n`;
+  const recBin = path.join(tmp, 'rec-fake-mihomo');
+  fs.writeFileSync(recBin, recSrc, { mode: 0o755 });
+  process.env.REC_LOG = recLog;
+  await unlockLib.runUnlockCheck([
+    { key: 'r-node-1', link: 'hy2://u:p@example.com:443?sni=example.com', region: 'US' },
+    { key: 'r-node-2', link: 'hy2://u:p@example.com:443?sni=example.com', region: 'US' },
+  ], recBin, {});
+  delete process.env.REC_LOG;
+  const recLines = fs.readFileSync(recLog, 'utf8').trim().split('\n');
+  check('unlock: per-node mihomo config holds only that node',
+    recLines.length === 2 && recLines[0] === '"r-node-1"' && recLines[1] === '"r-node-2"',
+    'got ' + JSON.stringify(recLines));
 
   lib.server.close(); mockEmos.close(); mockProbe.close();
   try { fs.rmSync(tmp, { recursive: true, force: true }); } catch (e) { /* noop */ }

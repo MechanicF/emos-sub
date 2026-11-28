@@ -512,29 +512,25 @@ async function checkEgressIp(port, url) {
 }
 
 // Mask an egress IP for display: the full address never leaves the server,
-// only enough to tell nodes apart. IPv4 keeps the first three octets
-// (203.0.113.*); IPv6 keeps the first four groups and masks the rest.
+// only the network part. IPv4 keeps the first two octets (203.0.*.*);
+// IPv6 keeps the first two groups and masks the rest.
 function maskIp(ip) {
   if (!ip || typeof ip !== 'string') return ip;
   const v4 = ip.split('.');
-  if (v4.length === 4 && v4.every((o) => /^\d{1,3}$/.test(o))) return v4.slice(0, 3).join('.') + '.*';
+  if (v4.length === 4 && v4.every((o) => /^\d{1,3}$/.test(o))) return v4.slice(0, 2).join('.') + '.*.*';
   if (ip.indexOf(':') >= 0) {
     let count = 0, cut = ip.length;
     for (let i = 0; i < ip.length; i++) {
-      if (ip[i] === ':') { count++; if (count === 4) { cut = i; break; } }
+      if (ip[i] === ':') { count++; if (count === 2) { cut = i; break; } }
     }
     return ip.slice(0, cut) + ':*';
   }
   return ip;
 }
 
-// Probe every provider for a single node. Caller must have selected the node
-// in the shared mihomo instance (see runUnlockCheck). The egress IP is
-// fetched first, alone, right after that select — running it in parallel
-// with the 7 provider probes let it share the burst of simultaneous
-// CONNECTs right after a select change, and on real runs every node came
-// back with the last node's IP. Serializing it ties the IP to this node's
-// selection; the 7 providers still run in parallel.
+// Probe every provider for a single node through its own mihomo instance
+// (see runUnlockCheck). The egress IP is fetched first, alone, before the
+// 7 provider probes; the providers still run in parallel.
 async function checkNodeOnProxy(port, node, opts) {
   const p = { port, landingCountry: String(node.region || node.country || '').toUpperCase().slice(0, 2) };
   const ip = await checkEgressIp(port);
@@ -545,7 +541,11 @@ async function checkNodeOnProxy(port, node, opts) {
   return { providers: Object.fromEntries(entries), ip: ip || null, updatedAt: new Date().toISOString() };
 }
 
-// Full check: one mihomo process, iterate nodes by selecting each in turn.
+// Full check: one mihomo process PER NODE, not one shared instance with a
+// select group. The shared select let every node come back with the same
+// egress IP on real runs (all 10 showed the server's own 209.205.228.*
+// instead of each node's own address) — a per-node instance holds only
+// that node's proxy, so its traffic cannot go through any other node.
 // onProgress(key, status, result) is optional for live UI updates.
 async function runUnlockCheck(nodes, binary, opts) {
   opts = opts || {};
@@ -561,31 +561,20 @@ async function runUnlockCheck(nodes, binary, opts) {
     usable.push({ node: n, proxy });
   }
   if (!usable.length) return out;
-  const mihomo = new MihomoProxy(binary, usable.map((x) => x.proxy), opts);
-  try {
-    // Startup phase: -t validation + process spawn can take seconds and used
-    // to be invisible (the UI just said "检测中…"). Report it so a stall
-    // here is distinguishable from a stall on a node.
-    if (opts.onProgress) opts.onProgress(null, 'starting');
-    await mihomo.start();
-    if (opts.onProgress) opts.onProgress(null, 'started');
-    for (const { node } of usable) {
-      if (opts.onProgress) opts.onProgress(node.key, 'checking');
-      const selected = await mihomo.select(node.key);
-      if (!selected) {
-        out[node.key] = { error: 'proxy_select_failed', updatedAt: new Date().toISOString() };
-        if (opts.onProgress) opts.onProgress(node.key, 'error', out[node.key]);
-        continue;
-      }
+  if (opts.onProgress) opts.onProgress(null, 'starting');
+  for (const { node, proxy } of usable) {
+    if (opts.onProgress) opts.onProgress(node.key, 'checking');
+    const mihomo = new MihomoProxy(binary, [proxy], opts);
+    try {
+      await mihomo.start();
       out[node.key] = await checkNodeOnProxy(mihomo.port, node, opts);
       if (opts.onProgress) opts.onProgress(node.key, 'done', out[node.key]);
+    } catch (e) {
+      out[node.key] = { error: e.message, updatedAt: new Date().toISOString() };
+      if (opts.onProgress) opts.onProgress(node.key, 'error', out[node.key]);
+    } finally {
+      mihomo.stop();
     }
-  } catch (e) {
-    for (const { node } of usable) {
-      if (!out[node.key]) out[node.key] = { error: e.message, updatedAt: new Date().toISOString() };
-    }
-  } finally {
-    mihomo.stop();
   }
   return out;
 }
