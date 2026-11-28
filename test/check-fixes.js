@@ -464,6 +464,41 @@ if (process.argv.includes('-t')) { setInterval(() => {}, 1000); } else { process
   check('unlock progress: -t hang fails after ~10s, not forever',
     /timed out/.test(hangErr) && ht >= 9000 && ht < 20000, 'got ' + ht + 'ms: ' + hangErr.slice(0, 80));
 
+  // 23. probeRequest never hangs: an oversized body resolves with what was
+  // collected (destroying the stream used to leave the promise pending
+  // forever — that wedged a real run for 323s), and a slow drip that keeps
+  // resetting the per-step timeout is cut off by the overall cap.
+  const bigTarget = http.createServer((_rq, rs) => { rs.writeHead(200, { 'Content-Type': 'text/html' }); rs.end('<html>' + 'x'.repeat(2 * 1024 * 1024) + '</html>'); });
+  await new Promise((r) => bigTarget.listen(0, '127.0.0.1', r));
+  const bigProxy = http.createServer();
+  bigProxy.on('connect', (rq, sock) => {
+    const [h, pt] = String(rq.url || '').split(':');
+    const up = net.connect(Number(pt), h, () => { sock.write('HTTP/1.1 200 Connection Established\r\n\r\n'); sock.pipe(up); up.pipe(sock); });
+    up.on('error', () => { try { sock.end('HTTP/1.1 502 Bad Gateway\r\n\r\n'); } catch (e) {} });
+  });
+  await new Promise((r) => bigProxy.listen(0, '127.0.0.1', r));
+  const bt0 = Date.now();
+  const bigRes = await unlockLib.probeRequest(bigProxy.address().port, 'http://127.0.0.1:' + bigTarget.address().port + '/big', { bodyLimit: 1024 * 1024, timeout: 8000 });
+  check('unlock: oversized body resolves instead of hanging', bigRes.status === 200 && bigRes.truncated === true && Date.now() - bt0 < 10000, 'got ' + (Date.now() - bt0) + 'ms status=' + bigRes.status);
+  bigTarget.close(); bigProxy.close();
+  const dripTarget = http.createServer((_rq, rs) => {
+    rs.writeHead(200, { 'Content-Type': 'text/html' });
+    const iv = setInterval(() => { try { rs.write('x'); } catch (e) { clearInterval(iv); } }, 500);
+    rs.on('close', () => clearInterval(iv));
+  });
+  await new Promise((r) => dripTarget.listen(0, '127.0.0.1', r));
+  const dripProxy = http.createServer();
+  dripProxy.on('connect', (rq, sock) => {
+    const [h, pt] = String(rq.url || '').split(':');
+    const up = net.connect(Number(pt), h, () => { sock.write('HTTP/1.1 200 Connection Established\r\n\r\n'); sock.pipe(up); up.pipe(sock); });
+    up.on('error', () => { try { sock.end('HTTP/1.1 502 Bad Gateway\r\n\r\n'); } catch (e) {} });
+  });
+  await new Promise((r) => dripProxy.listen(0, '127.0.0.1', r));
+  const dt0 = Date.now();
+  const dripRes = await unlockLib.probeRequest(dripProxy.address().port, 'http://127.0.0.1:' + dripTarget.address().port + '/drip', { bodyLimit: 1024 * 1024, timeout: 1000 });
+  check('unlock: slow drip is cut off by the overall cap', dripRes.error === 'probe_timeout' && Date.now() - dt0 < 10000, 'got ' + (Date.now() - dt0) + 'ms error=' + (dripRes.error || 'none'));
+  dripTarget.close(); dripProxy.close();
+
   lib.server.close(); mockEmos.close(); mockProbe.close();
   try { fs.rmSync(tmp, { recursive: true, force: true }); } catch (e) { /* noop */ }
   console.log('\ncheck-fixes: ' + pass + ' passed, ' + fail + ' failed');

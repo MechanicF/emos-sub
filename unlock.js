@@ -140,16 +140,30 @@ function probeRequest(proxyPort, targetUrl, opts) {
   if (body) headers['Content-Length'] = body.length;
   const timeoutMs = opts.timeout || DEFAULT_TIMEOUT_MS;
   const maxRedirects = 5;
+  // Hard cap for the whole call (CONNECT + inner request + redirects). The
+  // per-step timeouts above do not cover every path: when the body passed
+  // the limit, destroying the response stream used to leave the promise
+  // pending forever (no 'end'/'error' fires), so one oversized page wedged
+  // the checker, the node, and the whole run. Nothing here may hang past
+  // this cap.
+  const overallMs = timeoutMs * 3;
 
   return new Promise((resolve) => {
     let redirects = 0;
     let socket;
+    let settled = false;
     const agent = new http.Agent({ keepAlive: false });
     const done = (result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(overallTimer);
       try { if (socket) socket.destroy(); } catch (e) {}
       agent.destroy();
       resolve(result);
     };
+    const overallTimer = setTimeout(() => {
+      done({ status: 0, url: targetUrl, body: '', error: 'probe_timeout' });
+    }, overallMs);
 
     function run(currentUrl) {
       const u = new URL(currentUrl);
@@ -174,8 +188,12 @@ function probeRequest(proxyPort, targetUrl, opts) {
           const chunks = [];
           tres.on('data', (c) => {
             size += c.length;
-            if (size <= limit) chunks.push(c);
-            else tres.destroy();
+            if (size <= limit) { chunks.push(c); return; }
+            // Body past the cap: resolve with what was collected. Merely
+            // destroying the stream never settles this promise (see the
+            // overall cap above) — that was the 323s wedge.
+            const raw = Buffer.concat(chunks).toString('utf8');
+            done({ status: tres.statusCode, url: currentUrl, finalUrl: currentUrl, body: raw.toLowerCase(), rawBody: raw, headers: tres.headers, truncated: true });
           });
           tres.on('end', () => {
             const raw = Buffer.concat(chunks).toString('utf8');
