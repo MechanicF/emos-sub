@@ -499,6 +499,14 @@ if (process.argv.includes('-t')) { setInterval(() => {}, 1000); } else { process
   check('unlock: slow drip is cut off by the overall cap', dripRes.error === 'probe_timeout' && Date.now() - dt0 < 10000, 'got ' + (Date.now() - dt0) + 'ms error=' + (dripRes.error || 'none'));
   dripTarget.close(); dripProxy.close();
 
+  // 24. unlock tags show the failure reason for error/unknown providers
+  // (v1.5.21): an "异常" tag with no reason is unactionable, so the console
+  // renders the stored reason next to it; available tags stay clean.
+  const serverSrc = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  check('unlock: error/unknown tags render the stored reason',
+    serverSrc.includes("if((st==='error'||st==='unknown')&&r.reason)h+=' <small>'+esc(r.reason)+'</small>';"),
+    'reason rendering missing from unlockTagsHtml');
+
   lib.server.close(); mockEmos.close(); mockProbe.close();
   try { fs.rmSync(tmp, { recursive: true, force: true }); } catch (e) { /* noop */ }
   console.log('\ncheck-fixes: ' + pass + ' passed, ' + fail + ' failed');
