@@ -1,4 +1,4 @@
-// EMOS-gated sing-box gateway v1.5.17 — zero dependencies.
+// EMOS-gated sing-box gateway v1.5.18 — zero dependencies.
 // Node >= 18 (uses global fetch). Run: node server.js  (PORT env, default 3000)
 // Scope: EMOS login -> carrot > 500 -> console (nodes + per-user sub links)
 // + NODE TOTAL traffic only, from https://1e.lol/api/nodes. NO per-user traffic.
@@ -28,7 +28,7 @@ const net = require('net');
 const unlockLib = require('./unlock');
 
 const PORT = parseInt(process.env.PORT || '3000', 10);
-const VERSION = '1.5.17';
+const VERSION = '1.5.18';
 const CONFIG_PATH = path.join(__dirname, 'config', 'nodes.json');
 const CLASH_TEMPLATE_PATH = path.join(__dirname, 'config', 'templates', 'clash.yaml');
 const SINGBOX_TEMPLATE_PATH = path.join(__dirname, 'config', 'templates', 'singbox.json');
@@ -2264,6 +2264,10 @@ const ADMIN_HTML = `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8
 
 <div class="card panel" data-panel="nodes"><div class="section-head"><h2>节点 <span class="count" id="nodeCount"></span></h2><span class="pill" id="probeNote"></span></div>
 <div class="table-scroll"><table><thead><tr><th>Key</th><th>名称</th><th>到期</th><th>协议</th><th>服务器</th><th>探针</th><th>操作</th></tr></thead><tbody id="nodeRows"></tbody></table></div>
+<h2 style="margin-top:20px">解锁检测</h2>
+<p class="muted" id="unlockAdminNote"></p>
+<div class="actions unlock-controls"><button type="button" class="ghost" id="btnUnlockToggle">解锁检测：开启</button> <button type="button" class="ghost" id="btnUnlockRun">立即检测</button></div>
+<p id="unlockAdminMsg" class="msg"></p>
 <h2 id="formTitle">添加节点</h2>
 <label>节点链接（hy2:// / hysteria2:// / vless://）</label>
 <textarea id="nodeLink" rows="3" placeholder="hysteria2://密码@域名:端口?sni=域名&obfs=salamander&obfs-password=xxx#名字"></textarea>
@@ -2386,8 +2390,46 @@ async function loadAll(){
   var ok=await loadNodes();
   if(!ok)return;
   showApp();
-  await loadShares();await loadSettings();await loadHealth();
+  await loadShares();await loadSettings();await loadHealth();await loadUnlockAdmin();
 }
+var unlockAdminState={};
+async function loadUnlockAdmin(){
+  var r=await api('GET','/api/unlock');
+  if(r.status!==200)return;
+  var j=r.json;if(!j.ok)return;
+  unlockAdminState=j;
+  var n=document.getElementById('unlockAdminNote');
+  if(n){
+    if(!j.available){n.textContent='解锁检测未启用：服务器环境变量 UNLOCK_ENABLED 未设为 1（需重启服务）。';}
+    else if(j.running){n.textContent='解锁检测进行中… 完成后自动刷新。';}
+    else if(!j.enabled){n.textContent='解锁检测已关闭：24H 定时和立即检测都不再运行。';}
+    else{n.textContent='解锁检测已开启，每 24 小时后台更新，上次 '+(j.updatedAt?new Date(j.updatedAt).toLocaleString():'尚未完成')+(j.lastError?'（最近错误：'+j.lastError+'）':'');}
+  }
+  var t=document.getElementById('btnUnlockToggle');
+  if(t){t.textContent='解锁检测：'+(j.enabled?'开启':'关闭');t.disabled=!j.available;}
+  var b=document.getElementById('btnUnlockRun');
+  if(b){b.disabled=!j.available||!j.enabled||!!j.running;b.textContent=j.running?'检测中…':'立即检测';}
+}
+document.getElementById('btnUnlockToggle').onclick=async function(){
+  var want=!unlockAdminState.enabled;
+  var r=await api('POST','/api/unlock/toggle',{enabled:want});
+  if(!r.json.ok){document.getElementById('unlockAdminMsg').textContent='切换失败：'+(r.json.error||r.status);return}
+  document.getElementById('unlockAdminMsg').textContent='';
+  await loadUnlockAdmin();
+};
+document.getElementById('btnUnlockRun').onclick=async function(){
+  var r=await api('POST','/api/unlock/run',{});
+  if(!r.json.ok&&r.status!==409){document.getElementById('unlockAdminMsg').textContent='启动检测失败：'+(r.json.error||r.status);return}
+  document.getElementById('unlockAdminMsg').textContent='';
+  await loadUnlockAdmin();
+  // Poll until the background scan finishes, then refresh the status.
+  var ticks=0;
+  var timer=setInterval(async function(){
+    var q=await api('GET','/api/unlock');
+    ticks+=1;
+    if(!q.json.running||ticks>120){clearInterval(timer);await loadUnlockAdmin();}
+  },1000);
+};
 // 先探一次后台健康状态再决定显示什么：已登录直接进后台；未配置显示
 // “后台未配置”大面板；未登录才显示登录框。不要让用户对着一个永远登
 // 不上去的登录框发呆。
@@ -2492,7 +2534,7 @@ const HTML = `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><met
 <div class="stat"><div class="k">节点</div><div class="v" id="statNodes">—</div><div class="s">订阅内容</div></div>
 <div class="stat"><div class="k">订阅访问</div><div class="v" id="statAccess">—</div><div class="s">本条链接</div></div>
 </div>
-<div class="card"><div class="section-head"><h2>节点 · 总流量</h2><div class="unlock-controls"><button type="button" class="ghost" id="btnUnlockToggle">解锁检测：开启</button><button type="button" class="ghost" id="btnUnlockRun">立即检测</button></div></div><div class="table-scroll node-table"><table><thead><tr><th>节点</th><th>到期</th><th>状态</th><th>今日</th><th>本月已用 / 限额</th><th>解锁</th></tr></thead><tbody id="nodeRows"><tr><td colspan="6" class="muted">正在载入节点…</td></tr></tbody></table></div><p class="muted" id="unlockNote" style="margin-top:12px"></p></div>
+<div class="card"><h2>节点 · 总流量</h2><div class="table-scroll node-table"><table><thead><tr><th>节点</th><th>到期</th><th>状态</th><th>今日</th><th>本月已用 / 限额</th><th>解锁</th></tr></thead><tbody id="nodeRows"><tr><td colspan="6" class="muted">正在载入节点…</td></tr></tbody></table></div><p class="muted" id="unlockNote" style="margin-top:12px"></p></div>
 <div class="card"><h2>订阅链接</h2><p>用户：<code id="who"></code> · 萝卜：<b id="carrotOut"></b>（门槛 &gt; <span class="th">500</span>）</p>
 <p class="muted">订阅链接（每人专属，粘贴到客户端即可）：</p>
 <div class="sub-row"><span class="lbl">订阅地址</span><code id="subAuto"></code><button type="button" id="btnCopyAuto">复制</button></div>
@@ -2566,39 +2608,11 @@ async function loadUnlock(){
     if(n){
       if(!j.available){n.textContent="解锁检测未启用：服务器环境变量 UNLOCK_ENABLED 未设为 1（需重启服务）";}
       else if(j.running){n.textContent="解锁检测进行中… 完成后节点表会自动刷新。";}
-      else if(!j.enabled){n.textContent="解锁检测已关闭（点上方按钮开启，或每 24 小时不会再更新）。";}
+      else if(!j.enabled){n.textContent="解锁检测已关闭，每 24 小时不会再更新。";}
       else{n.textContent="解锁检测已开启，每 24 小时后台更新，上次 "+(j.updatedAt?new Date(j.updatedAt).toLocaleString():"尚未完成")+(j.lastError?"（最近错误："+j.lastError+"）":"");}
     }
-    var t=document.getElementById("btnUnlockToggle");
-    if(t){t.textContent="解锁检测："+(j.enabled?"开启":"关闭");t.disabled=!j.available;if(j.enabled)t.classList.remove("danger");else t.classList.add("danger");}
-    var b=document.getElementById("btnUnlockRun");
-    if(b){b.disabled=!j.available||!j.enabled||!!j.running;b.textContent=j.running?"检测中…":"立即检测";}
   }catch(e){}
 }
-function unlockHeaders(){return session?{"X-Session":session,"Content-Type":"application/json"}:{}}
-var btnToggle=document.getElementById("btnUnlockToggle");
-if(btnToggle)btnToggle.onclick=async function(){
-  var want=!unlockState.enabled;
-  var r=await fetch("/api/unlock/toggle",{method:"POST",credentials:"include",headers:unlockHeaders(),body:JSON.stringify({enabled:want})});
-  var j={};try{j=await r.json()}catch(e){}
-  if(!j.ok){showMsg("切换解锁检测失败："+(j.error||r.status));return}
-  await loadUnlock();
-};
-var btnRun=document.getElementById("btnUnlockRun");
-if(btnRun)btnRun.onclick=async function(){
-  var r=await fetch("/api/unlock/run",{method:"POST",credentials:"include",headers:unlockHeaders(),body:"{}"});
-  var j={};try{j=await r.json()}catch(e){}
-  if(!j.ok&&r.status!==409){showMsg("启动检测失败："+(j.error||r.status));return}
-  await loadUnlock();
-  // Poll until the background scan finishes, then refresh cached results.
-  var ticks=0;
-  var timer=setInterval(async function(){
-    var q=await fetch("/api/unlock",{credentials:"include",headers:unlockHeaders()});
-    var s={};try{s=await q.json()}catch(e){}
-    ticks+=1;
-    if(!s.running||ticks>120){clearInterval(timer);await loadUnlock();await loadNodes();}
-  },1000);
-};
 async function loadNodes(){
   var r;
   try{r=await fetch("/api/nodes",{credentials:"include",headers:session?{"X-Session":session}:{}});}
@@ -2699,12 +2713,16 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && u.pathname === '/api/auth/emos/login-url') return handleEmosLoginUrl(req, res);
     if (req.method === 'GET' && u.pathname === '/api/nodes') return await handleNodes(req, res);
     if (req.method === 'GET' && u.pathname === '/api/unlock') {
-      if (!getSession(req)) return sendJson(res, 401, { ok: false, error: 'login required' });
+      // Read-only state: both the console (shows the unlock column) and the
+      // admin panel (owns the controls) need it.
+      if (!getSession(req) && !getAdminSession(req)) return sendJson(res, 401, { ok: false, error: 'login required' });
       return sendJson(res, 200, unlockPublic());
     }
-    // Console controls: toggle detection and trigger an immediate scan.
+    // Admin controls: toggle detection and trigger an immediate scan. These
+    // are operator actions, so they require admin auth — a console session
+    // must NOT be able to flip them.
     if (req.method === 'POST' && u.pathname === '/api/unlock/toggle') {
-      if (!getSession(req)) return sendJson(res, 401, { ok: false, error: 'login required' });
+      if (!requireAdmin(req, res)) return;
       if (!UNLOCK_ENABLED) return sendJson(res, 400, { ok: false, error: 'unlock detection is disabled by environment (UNLOCK_ENABLED=0)' });
       let body;
       try { body = await readBody(req); } catch (e) { return sendJson(res, e.status || 400, { ok: false, error: e.message }); }
@@ -2713,7 +2731,7 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, { ok: true, enabled: unlockRuntimeEnabled });
     }
     if (req.method === 'POST' && u.pathname === '/api/unlock/run') {
-      if (!getSession(req)) return sendJson(res, 401, { ok: false, error: 'login required' });
+      if (!requireAdmin(req, res)) return;
       if (!UNLOCK_ENABLED || !unlockRuntimeEnabled) return sendJson(res, 400, { ok: false, error: 'unlock detection is off' });
       if (!fs.existsSync(MIHOMO_BIN)) return sendJson(res, 400, { ok: false, error: 'mihomo binary not found — run ./manage.sh install-mihomo' });
       if (unlockRunning) return sendJson(res, 409, { ok: false, error: 'a detection is already running' });

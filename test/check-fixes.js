@@ -342,12 +342,15 @@ const check = (name, cond, extra) => { if (cond) { console.log('OK   ' + name); 
   check('unlock: dead proxy returns clean error', !!dead.error && dead.status === 0);
   targetSrv.close(); mockProxy.close();
 
-  // 20. console controls: enable/disable switch + immediate scan endpoint.
+  // 20. admin controls: the toggle + immediate scan are admin-only (v1.5.18).
+  // A console session may still READ the state (it renders the unlock column)
+  // but must not flip the switch or trigger a scan.
   const CTRL_PORT = 3232;
   const ctrlState = path.join(tmp, 'ctrl-state.json');
   const ctrlUnlock = path.join(tmp, 'ctrl-unlock.json');
   const ctrlEnv = { ...process.env, PORT: String(CTRL_PORT), DEMO_ENABLED: '1',
-    UNLOCK_ENABLED: '1', EMOS_STATE_FILE: ctrlState, EMOS_UNLOCK_FILE: ctrlUnlock };
+    UNLOCK_ENABLED: '1', ADMIN_TOKEN: 'test-token',
+    EMOS_STATE_FILE: ctrlState, EMOS_UNLOCK_FILE: ctrlUnlock };
   const ctrlSrv = spawn(process.execPath, [path.join(__dirname, '..', 'server.js')],
     { cwd: path.join(__dirname, '..'), env: ctrlEnv, stdio: ['ignore', 'pipe', 'pipe'] });
   ctrlSrv.stderr.on('data', () => {});
@@ -358,19 +361,28 @@ const check = (name, cond, extra) => { if (cond) { console.log('OK   ' + name); 
   }
   const cl = json(await req(CTRL_PORT, 'POST', '/api/auth', {}, { carrot: 600 }));
   const CH = { 'X-Session': cl.session, 'Content-Type': 'application/json' };
+  const AH = { 'X-Admin-Token': 'test-token', 'Content-Type': 'application/json' };
   const cst0 = json(await req(CTRL_PORT, 'GET', '/api/unlock', CH));
-  check('unlock control: available and enabled by default', cst0.available === true && cst0.enabled === true);
-  const coff = json(await req(CTRL_PORT, 'POST', '/api/unlock/toggle', CH, { enabled: false }));
-  check('unlock control: toggle off succeeds', coff.ok === true && coff.enabled === false);
+  check('unlock control: console can still read state', cst0.available === true && cst0.enabled === true);
+  const cAnonGet = await req(CTRL_PORT, 'GET', '/api/unlock', {});
+  check('unlock control: state read requires login', cAnonGet.status === 401, 'got ' + cAnonGet.status);
+  const cTogConsole = await req(CTRL_PORT, 'POST', '/api/unlock/toggle', CH, { enabled: false });
+  check('unlock control: console toggle is rejected (admin only)', cTogConsole.status === 401, 'got ' + cTogConsole.status);
+  const cRunConsole = await req(CTRL_PORT, 'POST', '/api/unlock/run', CH, {});
+  check('unlock control: console run is rejected (admin only)', cRunConsole.status === 401, 'got ' + cRunConsole.status);
+  const coff = json(await req(CTRL_PORT, 'POST', '/api/unlock/toggle', AH, { enabled: false }));
+  check('unlock control: admin toggle off succeeds', coff.ok === true && coff.enabled === false);
   const cst1 = json(await req(CTRL_PORT, 'GET', '/api/unlock', CH));
   check('unlock control: disabled state persists', cst1.enabled === false);
-  const crawOff = await req(CTRL_PORT, 'POST', '/api/unlock/run', CH, {});
+  const crawOff = await req(CTRL_PORT, 'POST', '/api/unlock/run', AH, {});
   check('unlock control: immediate scan rejected while off', crawOff.status === 400, 'got ' + crawOff.status);
-  json(await req(CTRL_PORT, 'POST', '/api/unlock/toggle', CH, { enabled: true }));
-  const craw = await req(CTRL_PORT, 'POST', '/api/unlock/run', CH, {});
+  json(await req(CTRL_PORT, 'POST', '/api/unlock/toggle', AH, { enabled: true }));
+  const craw = await req(CTRL_PORT, 'POST', '/api/unlock/run', AH, {});
   // No mihomo binary in test env -> must be a clean 400 with a clear reason.
   check('unlock control: immediate scan reports missing mihomo clearly', craw.status === 400 &&
     /mihomo/.test(json(craw).error || ''), 'got ' + craw.status + ' ' + craw.body.slice(0, 80));
+  const cstAdmin = json(await req(CTRL_PORT, 'GET', '/api/unlock', AH));
+  check('unlock control: admin can read state', cstAdmin.ok === true && cstAdmin.available === true);
   const ctrlAnon = await req(CTRL_PORT, 'POST', '/api/unlock/toggle', {}, { enabled: false });
   check('unlock control: toggle requires login', ctrlAnon.status === 401, 'got ' + ctrlAnon.status);
   ctrlSrv.kill('SIGTERM');
